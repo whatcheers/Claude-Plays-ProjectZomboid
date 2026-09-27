@@ -776,8 +776,8 @@ function B.poll()
 	if not raw or raw == B.lastCmdRaw then return end
 	B.lastCmdRaw = raw
 	local lines = {}
-	for l in raw:gmatch("[^\n]+") do
-		l = l:gsub("\r", "")
+	for rawl in raw:gmatch("[^\n]+") do
+		local l = rawl:gsub("\r", "")
 		if l:match("%S") then lines[#lines + 1] = l end
 	end
 	local id = tonumber(lines[1])

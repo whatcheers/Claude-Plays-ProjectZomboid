@@ -10,8 +10,7 @@ local function readAll(path)
 	local l = r:readLine()
 	while l do lines[#lines + 1] = l; l = r:readLine() end
 	r:close()
-	return table.concat(lines, "
-")
+	return table.concat(lines, "\n")
 end
 
 local function writeStatus(msg)
