@@ -508,6 +508,7 @@ B.immediate.look = function(p) return "ok" end
 B.immediate.say = function(p, a, line) p:Say((line:gsub("^%s*say%s*", ""))); return "said" end
 B.immediate.speed = function(p, a) B.speed = num(a[1]); return "speed " .. B.speed end
 B.immediate.lua = function(p, a, line)
+	if not loadstring then error("loadstring is disabled in B42 mods") end
 	local code = line:gsub("^%s*lua%s*", "")
 	local f = loadstring("return " .. code) or loadstring(code)
 	if not f then error("compile failed") end

@@ -1,5 +1,5 @@
--- Thin loader. Real logic is in ~/Zomboid/Lua/claudebot/bot.lua so it can be
--- hot-reloaded: touching claudebot/reload.txt re-reads and re-runs it.
+-- Event glue + hot reload. ClaudeBot.lua (all the logic) is loaded by the game
+-- before this file; touching claudebot/reload.txt re-runs it via reloadLuaFile.
 ClaudeBotLoader = ClaudeBotLoader or {}
 local L = ClaudeBotLoader
 
@@ -10,7 +10,8 @@ local function readAll(path)
 	local l = r:readLine()
 	while l do lines[#lines + 1] = l; l = r:readLine() end
 	r:close()
-	return table.concat(lines, "\n")
+	return table.concat(lines, "
+")
 end
 
 local function writeStatus(msg)
@@ -19,14 +20,15 @@ local function writeStatus(msg)
 	w:close()
 end
 
+function L.botPath()
+	local info = getModInfoByID("ClaudeBot")
+	return info:getDir() .. "/media/lua/client/ClaudeBot.lua"
+end
+
 function L.load()
-	local src = readAll("claudebot/bot.lua")
-	if not src then writeStatus("ERR bot.lua missing"); return false end
-	local f, err = loadstring(src, "bot.lua")
-	if not f then writeStatus("ERR compile: " .. tostring(err)); print("[ClaudeBot] " .. tostring(err)); return false end
-	local ok, e = pcall(f)
-	if not ok then writeStatus("ERR run: " .. tostring(e)); print("[ClaudeBot] " .. tostring(e)); return false end
-	writeStatus("OK loaded " .. tostring(getTimestampMs()))
+	local ok, e = pcall(function() reloadLuaFile(L.botPath()) end)
+	if not ok then writeStatus("ERR reload: " .. tostring(e)); return false end
+	writeStatus("OK reloaded " .. tostring(ClaudeBot and ClaudeBot.VERSION) .. " at " .. tostring(getTimestampMs()) .. " from " .. L.botPath())
 	return true
 end
 
@@ -59,7 +61,7 @@ local function call(name, ...)
 	end
 end
 
-L.load()
+writeStatus(ClaudeBot and ("OK bot v" .. tostring(ClaudeBot.VERSION)) or "ERR ClaudeBot.lua did not load")
 Events.OnTick.Add(function() call("onTick") end)
 Events.OnRenderTick.Add(function() checkReload(); call("onRender") end)
 Events.OnPlayerUpdate.Add(function(p) call("onPlayerUpdate", p) end)
