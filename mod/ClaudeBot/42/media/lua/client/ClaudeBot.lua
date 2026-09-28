@@ -301,8 +301,9 @@ function B.map(p, R)
 				if zk then ch = zk end
 				if x0 + tx == px and y0 + ty == py then ch = "@" end
 				G[r][c] = ch
-				if G[r - 1][c] == " " and try(function() return sq:getWall(true) end) then G[r - 1][c] = "-" end
-				if G[r][c - 1] == " " and try(function() return sq:getWall(false) end) then G[r][c - 1] = "|" end
+				local nsq, wsq = sqAt(x0 + tx, y0 + ty - 1, pz), sqAt(x0 + tx - 1, y0 + ty, pz)
+				if G[r - 1][c] == " " and (try(function() return sq:getWall(true) end) or (nsq and try(function() return sq:isBlockedTo(nsq) end))) then G[r - 1][c] = "-" end
+				if G[r][c - 1] == " " and (try(function() return sq:getWall(false) end) or (wsq and try(function() return sq:isBlockedTo(wsq) end))) then G[r][c - 1] = "|" end
 			end
 		end
 	end end
@@ -558,6 +559,19 @@ B.immediate.scan = function(p, a)
 		lines[#lines + 1] = string.format("%dm %s: box %d,%d %dx%d floors %d%s | %s", math.floor(e.d), dir, e.b:getX(), e.b:getY(), e.b:getW(), e.b:getH(),
 			(try(function() return e.b:getMaxLevel() end) or 0) + 1, flags, table.concat(rooms, ","))
 	end
+	-- room layout of the building we're in / next to
+	local here = nil
+	for i = 1, #found do
+		if found[i].b:getRooms():size() > 2 and found[i].d < 60 then here = found[i]; break end
+	end
+	if here then
+		lines[#lines + 1] = "   rooms of the " .. math.floor(here.d) .. "m building:"
+		local rs = here.b:getRooms()
+		for j = 0, rs:size() - 1 do
+			local r = rs:get(j)
+			lines[#lines + 1] = string.format("   room %s at %d,%d %dx%d floor %d", r:getName(), r:getX(), r:getY(), r:getW(), r:getH(), r:getZ())
+		end
+	end
 	B.scanResult = lines
 	return #found .. " buildings within " .. R
 end
@@ -580,15 +594,21 @@ B.cmds.fight = function(p, a)
 end
 B.immediate.maxturn = function(p, a) B.maxTurnMin = num(a[1]); return "max turn " .. B.maxTurnMin .. " min" end
 
+function B.path(p, x, y, z)
+	local act = ISPathFindAction:pathToLocationF(p, x + 0.5, y + 0.5, z)
+	act:setOnFail(function() B.res("go " .. x .. " " .. y, false, "PATH FAILED (no route)") end)
+	Q(act)
+end
+
 B.cmds.go = function(p, a)
 	local x, y = num(a[1], "x"), num(a[2], "y")
 	local z = tonumber(a[3]) or math.floor(p:getZ())
-	Q(ISPathFindAction:pathToLocationF(p, x + 0.5, y + 0.5, z))
+	B.path(p, x, y, z)
 	return "pathing to " .. x .. "," .. y .. "," .. z
 end
 B.cmds.step = function(p, a)
 	local x, y = math.floor(p:getX()) + num(a[1], "dx"), math.floor(p:getY()) + num(a[2], "dy")
-	Q(ISPathFindAction:pathToLocationF(p, x + 0.5, y + 0.5, math.floor(p:getZ())))
+	B.path(p, x, y, math.floor(p:getZ()))
 	return "pathing to " .. x .. "," .. y
 end
 B.cmds.door = function(p, a)
