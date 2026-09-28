@@ -150,6 +150,11 @@ if __name__ == "__main__":
             f.write(str(time.time()))
         time.sleep(2)
         print(open(os.path.join(D, "loader.txt")).read() if os.path.exists(os.path.join(D, "loader.txt")) else "no loader.txt")
+    elif a[0] == "eval":
+        # python pz.py eval "<lua statements; set R = value>"
+        with open(os.path.join(D, "eval.lua"), "w", encoding="utf-8") as f:
+            f.write("local p = getSpecificPlayer(0)\nlocal B = ClaudeBot\nlocal R\n" + " ".join(a[1:]) + "\nClaudeBot.evalResult = R\n")
+        do(["eval"])
     elif a[0] == "do":
         do(a[1:])
     else:

@@ -520,6 +520,14 @@ B.immediate = {}
 
 B.immediate.look = function(p) return "ok" end
 
+-- eval: runs claudebot/eval.lua (written by pz.py) via reloadLuaFile; the
+-- snippet sets ClaudeBot.evalResult. Stand-in for loadstring, which B42 disables.
+B.immediate.eval = function(p)
+	B.evalResult = nil
+	reloadLuaFile(Core.getMyDocumentFolder() .. "/Lua/claudebot/eval.lua")
+	return tostring(B.evalResult)
+end
+
 -- scan [radius]: nearest buildings from the map (what the character's map shows)
 B.immediate.scan = function(p, a)
 	local R = tonumber(a[1]) or 150
@@ -726,9 +734,9 @@ end
 
 function B.fightTick(p)
 	local f = B.fight
-	if nowMin() > f.untilMin then B.fight = nil; B.res("fight", true, "fight time limit"); return end
-	local zs = B.zombies(p, 8)
-	if #zs == 0 then B.fight = nil; B.res("fight", true, "no zombies within 8, fight over"); p:setIsAiming(false); return end
+	if nowMin() > f.untilMin then B.fight = nil; p:setIsAiming(false); B.res("fight", true, "fight time limit"); return end
+	local zs = B.zombies(p, f.hunt and 14 or 8)
+	if #zs == 0 then B.fight = nil; B.res("fight", true, "no zombies in range, fight over"); p:setIsAiming(false); return end
 	local near = 0
 	for _, e in ipairs(zs) do if e.d < 2 then near = near + 1 end end
 	if near >= 3 then B.fight = nil; B.endTurn("surrounded: " .. near .. " zombies within 2 tiles"); return end
@@ -739,7 +747,7 @@ function B.fightTick(p)
 	if t.d <= range + 0.3 then
 		if f.pathing then ISTimedActionQueue.clear(p); f.pathing = false end
 		B.attack(p, t.z)
-	elseif f.hunt and t.seen and t.d < 10 then
+	elseif f.hunt and t.seen and t.d < 14 then
 		local now = getTimestampMs()
 		if not f.pathing or now - (f.lastPath or 0) > 1500 then
 			ISTimedActionQueue.clear(p)
@@ -765,7 +773,13 @@ function B.startTurn(id, lines)
 	if not p or p:isDead() then B.dumpState(p and "dead" or "no player"); return end
 	local cont = false
 	if lines[1] and lines[1]:match("^%s*continue") then cont = true; table.remove(lines, 1) end
-	if not cont then ISTimedActionQueue.clear(p); B.fight = nil end
+	B.deferred = nil
+	if not cont then
+		if #ISTimedActionQueue.getTimedActionQueue(p).queue > 0 or p:getCharacterActions():size() > 0 then ISTimedActionQueue.clear(p) end
+		B.fight = nil
+	end
+	if try(function() return p:isPerformingAttackAnimation() end) then p:setPerformingAttackAnimation(false) end
+	p:setIsAiming(false)
 	local needRun = cont
 	for _, l in ipairs(lines) do
 		local args = {}
@@ -776,7 +790,9 @@ function B.startTurn(id, lines)
 			B.res(l, ok, msg)
 			if B.runAfterImm then needRun = true; B.runAfterImm = nil end
 		elseif B.cmds[verb] then
-			Q(ClaudeBotStep:new(p, l, verb, args))
+			-- queued one tick later: clear() -> StopAllActionQueue cancels anything added this tick
+			B.deferred = B.deferred or {}
+			table.insert(B.deferred, { l, verb, args })
 			needRun = true
 		else
 			B.res(l, false, "unknown command")
@@ -807,6 +823,22 @@ function B.monitor(p)
 	if not B.turnActive then return end
 	if p:isDead() then B.endTurn("DEAD"); return end
 	B.tickN = (B.tickN or 0) + 1
+	if B.deferred then
+		-- let a swing finish before queueing; actions started mid-swing are rejected
+		local swinging = try(function() return p:isPerformingAttackAnimation() end) or p:getCurrentState() == SwipeStatePlayer.instance()
+		if swinging then
+			B.swingSince = B.swingSince or getTimestampMs()
+			if getTimestampMs() - B.swingSince > 1500 then
+				p:setPerformingAttackAnimation(false); p:setIsAiming(false); p:setAttackStarted(false)
+				p:changeState(IdleState.instance())
+			end
+			return
+		end
+		B.swingSince = nil
+		for _, d in ipairs(B.deferred) do Q(ClaudeBotStep:new(p, d[1], d[2], d[3])) end
+		B.deferred = nil
+		return
+	end
 	if B.fight then B.fightTick(p) end
 	if not B.turnActive or B.tickN % 5 ~= 0 then return end
 	for _, e in ipairs(B.zombies(p, 20)) do
