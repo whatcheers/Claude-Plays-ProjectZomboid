@@ -30,7 +30,9 @@ end
 local function enc(v, out)
 	local t = type(v)
 	if t == "table" then
-		if v[1] ~= nil or next(v) == nil then
+		local empty = true
+		for _ in pairs(v) do empty = false; break end
+		if v[1] ~= nil or empty then
 			out[#out + 1] = "["
 			for i = 1, #v do
 				if i > 1 then out[#out + 1] = "," end
@@ -373,6 +375,17 @@ function B.state(reason)
 		s.zombies[#s.zombies + 1] = zi
 	end
 
+	s.zdebug = {}
+	local zl = getCell():getZombieList()
+	for i = 0, zl:size() - 1 do
+		local z = zl:get(i)
+		local dx, dy = z:getX() - p:getX(), z:getY() - p:getY()
+		local d = math.sqrt(dx * dx + dy * dy)
+		if d < 12 then
+			s.zdebug[#s.zdebug + 1] = string.format("#%d d=%.1f dead=%s floor=%s health=%.2f seen=%s", B.zid(z), d, tostring(z:isDead()),
+				tostring(try(function() return z:isOnFloor() end)), z:getHealth(), tostring(canSee(p, z)))
+		end
+	end
 	-- nearby objects
 	local px, py, pz = math.floor(p:getX()), math.floor(p:getY()), math.floor(p:getZ())
 	local R = B.mapR
@@ -412,6 +425,7 @@ function B.state(reason)
 			end
 		end
 	end end
+	s.scan = B.scanResult; B.scanResult = nil
 	local ok, m = pcall(B.map, p, R)
 	if ok then s.map = m else s.mapErr = tostring(m) end
 	local room = p:getCurrentSquare() and p:getCurrentSquare():getRoom()
@@ -505,6 +519,40 @@ B.cmds = {}
 B.immediate = {}
 
 B.immediate.look = function(p) return "ok" end
+
+-- scan [radius]: nearest buildings from the map (what the character's map shows)
+B.immediate.scan = function(p, a)
+	local R = tonumber(a[1]) or 150
+	local px, py = p:getX(), p:getY()
+	local all = getWorld():getMetaGrid():getBuildings()
+	local found = {}
+	for i = 0, all:size() - 1 do
+		local b = all:get(i)
+		local cx, cy = b:getX() + b:getW() / 2, b:getY() + b:getH() / 2
+		local dx, dy = cx - px, cy - py
+		local d = math.sqrt(dx * dx + dy * dy)
+		if d <= R then found[#found + 1] = { b = b, d = d, cx = cx, cy = cy } end
+	end
+	table.sort(found, function(x, y) return x.d < y.d end)
+	local lines = {}
+	for i = 1, math.min(#found, 15) do
+		local e = found[i]
+		local rooms, seen = {}, {}
+		local rs = e.b:getRooms()
+		for j = 0, rs:size() - 1 do
+			local n = rs:get(j):getName()
+			if n and not seen[n] then seen[n] = true; rooms[#rooms + 1] = n end
+		end
+		local dir = (e.cy < py - 3 and "N" or (e.cy > py + 3 and "S" or "")) .. (e.cx < px - 3 and "W" or (e.cx > px + 3 and "E" or ""))
+		local flags = ""
+		if try(function() return e.b:isHasBeenVisited() end) then flags = flags .. " visited" end
+		if try(function() return e.b:isAllExplored() end) then flags = flags .. " explored" end
+		lines[#lines + 1] = string.format("%dm %s: box %d,%d %dx%d floors %d%s | %s", math.floor(e.d), dir, e.b:getX(), e.b:getY(), e.b:getW(), e.b:getH(),
+			(try(function() return e.b:getMaxLevel() end) or 0) + 1, flags, table.concat(rooms, ","))
+	end
+	B.scanResult = lines
+	return #found .. " buildings within " .. R
+end
 B.immediate.say = function(p, a, line) p:Say((line:gsub("^%s*say%s*", ""))); return "said" end
 B.immediate.speed = function(p, a) B.speed = num(a[1]); return "speed " .. B.speed end
 B.immediate.lua = function(p, a, line)
@@ -518,10 +566,9 @@ B.immediate.lua = function(p, a, line)
 	for i = 2, #r do parts[#parts + 1] = tostring(r[i]) end
 	return table.concat(parts, " | ")
 end
-B.immediate.fight = function(p, a)
-	B.fight = { untilMin = nowMin() + (tonumber(a[1]) or 5) }
-	B.runAfterImm = true
-	return "fighting"
+B.cmds.fight = function(p, a)
+	B.fight = { untilMin = nowMin() + (tonumber(a[1]) or 5), hunt = a[2] ~= "hold" }
+	return B.fight.hunt and "hunting" or "holding position"
 end
 B.immediate.maxturn = function(p, a) B.maxTurnMin = num(a[1]); return "max turn " .. B.maxTurnMin .. " min" end
 
@@ -689,7 +736,19 @@ function B.fightTick(p)
 	local t = zs[1]
 	local w = p:getPrimaryHandItem()
 	local range = (w and instanceof(w, "HandWeapon") and w:getMaxRange()) or 0.9
-	if t.d <= range + 0.3 then B.attack(p, t.z) else p:faceThisObject(t.z) end
+	if t.d <= range + 0.3 then
+		if f.pathing then ISTimedActionQueue.clear(p); f.pathing = false end
+		B.attack(p, t.z)
+	elseif f.hunt and t.seen and t.d < 10 then
+		local now = getTimestampMs()
+		if not f.pathing or now - (f.lastPath or 0) > 1500 then
+			ISTimedActionQueue.clear(p)
+			ISTimedActionQueue.add(ISPathFindAction:pathToLocationF(p, t.z:getX(), t.z:getY(), t.z:getZ()))
+			f.pathing, f.lastPath = true, now
+		end
+	else
+		p:faceThisObject(t.z)
+	end
 end
 
 ---------------------------------------------------------------- turn loop

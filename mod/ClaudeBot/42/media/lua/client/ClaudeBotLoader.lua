@@ -21,7 +21,9 @@ end
 
 function L.botPath()
 	local info = getModInfoByID("ClaudeBot")
-	return info:getDir() .. "/media/lua/client/ClaudeBot.lua"
+	local v = info.getVersionDir and info:getVersionDir()
+	if v then return v .. "/media/lua/client/ClaudeBot.lua" end
+	return info:getDir() .. "/42/media/lua/client/ClaudeBot.lua"
 end
 
 function L.load()

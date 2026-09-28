@@ -112,6 +112,9 @@ def show(s):
     fl = s.get("floor") or []
     if fl:
         L.append("floor items: " + "; ".join(f"{f['x']},{f['y']} {f.get('name')}{' #' + str(f['id']) if 'id' in f else ''}" for f in fl))
+    if s.get("scan"):
+        L.append("buildings:")
+        L += ["  " + b for b in s["scan"]]
     inv = s.get("inventory") or []
     if inv:
         L.append("inventory:")
