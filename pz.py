@@ -1,13 +1,16 @@
-"""Drive ClaudeBot (Project Zomboid mod) turn by turn.
+"""Drive ClaudeBot (Project Zomboid B42 mod) turn by turn. See PLAYING.md.
 
-  python pz.py state                 print the last state
   python pz.py do "go 100 200" ...   send a turn, wait for the game to pause, print state
-  python pz.py reload                hot-reload bot.lua in the game
+  python pz.py state                 re-print the last state
   python pz.py raw                   dump state.json
+  python pz.py reload                hot-reload ClaudeBot.lua in the running game
+  python pz.py eval "R = p:getX()"   run Lua in the game (p = player, R = result)
+
+Set ZOMBOID_DIR if your Zomboid user folder isn't ~/Zomboid.
 """
 import json, os, sys, time
 
-D = os.path.expanduser("~/Zomboid/Lua/claudebot")
+D = os.path.join(os.environ.get("ZOMBOID_DIR") or os.path.expanduser("~/Zomboid"), "Lua", "claudebot")
 STATE, CMD = os.path.join(D, "state.json"), os.path.join(D, "cmd.txt")
 
 
@@ -124,6 +127,7 @@ def show(s):
 
 
 def do(cmds, timeout=180):
+    os.makedirs(D, exist_ok=True)
     tid = int(time.time() * 10) % 10**9
     with open(CMD, "w", encoding="utf-8") as f:
         f.write(str(tid) + "\n" + "\n".join(cmds) + "\n")
@@ -134,7 +138,7 @@ def do(cmds, timeout=180):
         if s and s.get("turn") == tid and not s.get("running"):
             show(s)
             return
-    print(f"timeout after {timeout}s waiting for turn {tid}")
+    print(f"timeout after {timeout}s waiting for turn {tid}. Is the game running, with ClaudeBot enabled and a character in the world?")
     show(read_state())
 
 
@@ -146,10 +150,18 @@ if __name__ == "__main__":
     elif a[0] == "raw":
         print(json.dumps(read_state(), indent=1))
     elif a[0] == "reload":
+        status = os.path.join(D, "loader.txt")
+        before = os.path.getmtime(status) if os.path.exists(status) else 0
+        os.makedirs(D, exist_ok=True)
         with open(os.path.join(D, "reload.txt"), "w") as f:
             f.write(str(time.time()))
-        time.sleep(2)
-        print(open(os.path.join(D, "loader.txt")).read() if os.path.exists(os.path.join(D, "loader.txt")) else "no loader.txt")
+        for _ in range(20):
+            time.sleep(0.5)
+            if os.path.exists(status) and os.path.getmtime(status) > before:
+                print(open(status).read())
+                break
+        else:
+            print("no answer from the game. Is it running, with ClaudeBot enabled and a character in the world?")
     elif a[0] == "eval":
         # python pz.py eval "<lua statements; set R = value>"
         with open(os.path.join(D, "eval.lua"), "w", encoding="utf-8") as f:

@@ -1,6 +1,8 @@
 -- ClaudeBot: turn-based remote control for Project Zomboid (B42, singleplayer).
--- cmd.txt  : line 1 = turn id, following lines = commands
--- state.json: written whenever a turn ends (game auto-pauses)
+-- Files live in ~/Zomboid/Lua/claudebot/:
+--   cmd.txt    : line 1 = turn id, following lines = commands (see PLAYING.md)
+--   state.json : written whenever a turn ends (the game auto-pauses)
+--   eval.lua   : optional snippet run by the "eval" command (debugging)
 ClaudeBot = ClaudeBot or {}
 local B = ClaudeBot
 B.VERSION = 1
@@ -111,7 +113,9 @@ function B.zombies(p, radius)
 	local px, py, pz = p:getX(), p:getY(), math.floor(p:getZ())
 	for i = 0, list:size() - 1 do
 		local z = list:get(i)
-		if z and not z:isDead() then
+		if z and z:isDead() then
+			B.zids[z] = nil
+		elseif z then
 			local dx, dy = z:getX() - px, z:getY() - py
 			local d = math.sqrt(dx * dx + dy * dy)
 			if d <= radius then
@@ -577,17 +581,6 @@ B.immediate.scan = function(p, a)
 end
 B.immediate.say = function(p, a, line) p:Say((line:gsub("^%s*say%s*", ""))); return "said" end
 B.immediate.speed = function(p, a) B.speed = num(a[1]); return "speed " .. B.speed end
-B.immediate.lua = function(p, a, line)
-	if not loadstring then error("loadstring is disabled in B42 mods") end
-	local code = line:gsub("^%s*lua%s*", "")
-	local f = loadstring("return " .. code) or loadstring(code)
-	if not f then error("compile failed") end
-	local r = { pcall(f) }
-	if not r[1] then error(tostring(r[2])) end
-	local parts = {}
-	for i = 2, #r do parts[#parts + 1] = tostring(r[i]) end
-	return table.concat(parts, " | ")
-end
 B.cmds.fight = function(p, a)
 	B.fight = { untilMin = nowMin() + (tonumber(a[1]) or 5), hunt = a[2] ~= "hold" }
 	return B.fight.hunt and "hunting" or "holding position"
