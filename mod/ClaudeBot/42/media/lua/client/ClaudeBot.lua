@@ -350,7 +350,7 @@ function B.state(reason)
 		local f = {}
 		if bp:bleeding() then f[#f + 1] = "bleeding" end
 		if bp:scratched() then f[#f + 1] = "scratched" end
-		if bp:bitten() then f[#f + 1] = "BITTEN" end
+		if bp:bitten() or bp:getBiteTime() > 0 then f[#f + 1] = "BITTEN" end
 		if bp:isCut() then f[#f + 1] = "laceration" end
 		if bp:deepWounded() then f[#f + 1] = "deepwound" end
 		if try(function() return bp:getFractureTime() > 0 end) then f[#f + 1] = "fracture" end
@@ -564,8 +564,11 @@ end
 -- eval: runs claudebot/eval.lua (written by pz.py) via reloadLuaFile; the
 -- snippet sets ClaudeBot.evalResult. Stand-in for loadstring, which B42 disables.
 B.immediate.eval = function(p)
-	B.evalResult = nil
+	-- reloadLuaFile logs script errors without necessarily throwing them here.
+	local pending = {}
+	B.evalResult = pending
 	reloadLuaFile(Core.getMyDocumentFolder() .. "/Lua/claudebot/eval.lua")
+	if B.evalResult == pending then error("eval did not complete; see Zomboid/console.txt") end
 	return tostring(B.evalResult)
 end
 
@@ -677,9 +680,20 @@ B.cmds.door = function(p, a)
 end
 B.cmds.window = function(p, a)
 	local sq = sqAt(num(a[1]), num(a[2]), math.floor(p:getZ()))
-	local w = findOn(sq, function(o) return isWindow(o) or instanceof(o, "IsoWindowFrame") end)
-	if not w then error("no window at " .. a[1] .. "," .. a[2]) end
 	local verb = a[3] or "climb"
+	if verb ~= "open" and verb ~= "close" and verb ~= "smash" and verb ~= "clearglass" and verb ~= "climb" then
+		error("window verb: open|close|smash|clearglass|climb")
+	end
+	-- Frames may appear before the actual window in a square's object list.
+	-- Only climb a bare frame when there is no working window to interact with.
+	local w = findOn(sq, isWindow)
+	if not w then
+		w = findOn(sq, function(o) return instanceof(o, "IsoWindowFrame") end)
+		if not w then error("no window at " .. a[1] .. "," .. a[2]) end
+		if verb ~= "climb" then error("bare window frame: only climb is supported") end
+	elseif (verb == "open" and w:IsOpen()) or (verb == "close" and not w:IsOpen()) then
+		return "window already " .. (verb == "open" and "open" or "closed")
+	end
 	if not luautils.walkAdjWindowOrDoor(p, sq, w, true) then error("can't reach window") end
 	if verb == "open" or verb == "close" then Q(ISOpenCloseWindow:new(p, w))
 	elseif verb == "smash" then Q(ISSmashWindow:new(p, w))
@@ -1221,13 +1235,17 @@ function B.fightTick(p)
 			local tr = f.tries[t.z]
 			local hp = t.z:getHealth()
 			local down = try(function() return t.z:isOnFloor() end)
-			if not tr or hp < tr.hp or down then
-				f.tries[t.z] = { hp = hp, n = 1 }
+			if not tr or hp < tr.hp or (down and not tr.down) then
+				f.tries[t.z] = { hp = hp, n = 1, down = down }
 			else
 				tr.n = tr.n + 1
+				tr.down = down
 				if tr.n > 4 then
-					f.ignore[t.z] = true
-					B.rlog("can't hit Z#" .. B.zid(t.z) .. " (4 swings, no damage): giving up on it")
+					-- Ignoring only within this fight let reflexes immediately retry
+					-- the same un-hittable enemy in a fresh fight. Stop for a decision.
+					local reason = "combat stalled: Z#" .. B.zid(t.z) .. " (4 swings, no damage); reposition or retreat"
+					B.endFight(p, false, reason)
+					B.endTurn(reason)
 					return
 				end
 			end
@@ -1471,6 +1489,14 @@ function B.finishTask(ok, msg)
 	B.task = nil
 	B.setSpeedRaw(B.speed)
 	B.res(t.line, ok, msg)
+	if not ok then
+		for i = t.resumeFrom, #(B.pending or {}) do
+			B.res(B.pending[i][1], false, "NOT RUN: task '" .. t.line .. "' failed")
+		end
+		B.pending, B.pendingIdx, B.resumeFrom, B.deferred = {}, nil, nil, nil
+		B.endTurn("task failed: " .. t.line)
+		return
+	end
 	if B.pending and t.resumeFrom <= #B.pending then B.resumeFrom = t.resumeFrom; B.resumePending() end
 end
 
@@ -2031,7 +2057,11 @@ end
 ---------------------------------------------------------------- turn loop
 function B.biteCount(p)
 	local n, parts = 0, p:getBodyDamage():getBodyParts()
-	for i = 0, parts:size() - 1 do if parts:get(i):bitten() then n = n + 1 end end
+	-- bitten() hides covered wounds; the timer preserves the underlying injury.
+	for i = 0, parts:size() - 1 do
+		local bp = parts:get(i)
+		if bp:bitten() or bp:getBiteTime() > 0 then n = n + 1 end
+	end
 	return n
 end
 
@@ -2127,6 +2157,11 @@ end
 function B.monitor(p)
 	if not B.turnActive then return end
 	if p:isDead() then B.endTurn("DEAD"); return end
+	-- Check before deferred work or animation waits can return early.
+	local h = p:getBodyDamage():getOverallBodyHealth()
+	local bites = B.biteCount(p)
+	if bites > (B.turnBites or bites) then B.turnBites = bites; B.turnHealth = h; B.endTurn("BITTEN (health " .. r2(h) .. ")"); return end
+	if B.turnHealth and h < B.turnHealth - B.hurtPause then B.turnHealth = h; B.endTurn("hurt (health " .. r2(h) .. ")"); return end
 	B.tickN = (B.tickN or 0) + 1
 	if B.deferred then
 		-- let a swing finish before queueing; actions started mid-swing are rejected
@@ -2184,10 +2219,6 @@ function B.monitor(p)
 		B.hordeWarned = coming
 		B.endTurn("horde: " .. coming .. " zombies coming for you"); return
 	end
-	local h = p:getBodyDamage():getOverallBodyHealth()
-	local bites = B.biteCount(p)
-	if bites > (B.turnBites or bites) then B.turnBites = bites; B.turnHealth = h; B.endTurn("BITTEN (health " .. r2(h) .. ")"); return end
-	if h < B.turnHealth - B.hurtPause then B.turnHealth = h; B.endTurn("hurt (health " .. r2(h) .. ")"); return end
 	-- a night's sleep runs past the turn limit; the turn ends when you wake up
 	local asleep = p:isAsleep()
 	if B.wasAsleep and not asleep then B.wasAsleep = nil; B.endTurn("woke up (fatigue " .. r2(p:getStats():get(CharacterStat.FATIGUE)) .. ")"); return end
@@ -2195,7 +2226,9 @@ function B.monitor(p)
 	if nowMin() > B.turnDeadline and not asleep then B.endTurn("turn time limit"); return end
 	if climbing then B.climbSeen = true; return end
 	local q = ISTimedActionQueue.getTimedActionQueue(p).queue
-	if #q == 0 and not B.fight and not B.bash and not B.fleeing and not B.task and not p:isAsleep() then
+	-- Combat can defer interrupted commands during this same monitor tick.
+	-- Keep the turn alive until the next tick queues them.
+	if #q == 0 and not B.deferred and not B.fight and not B.bash and not B.fleeing and not B.task and not p:isAsleep() then
 		if B.resumeFrom then B.resumePending(); return end
 		if B.upkeep(p) then return end
 		-- the game clears the whole queue when an action fails or gets interrupted; say
