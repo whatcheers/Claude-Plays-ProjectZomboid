@@ -65,8 +65,8 @@ IDs are item IDs (`#123456`) from the state; coordinates are world tiles (`x y`,
 | `door x y` | walk to the door on that tile and open or close it |
 | `window x y open\|close\|smash\|clearglass\|climb` | window actions (`climb` is the default) |
 | `take id [id...]` | move items into your main inventory (from containers, bodies, the floor or your bags) |
-| `loot x y [filter] [max]` | take everything (or names matching `filter`, `*` = all) from all containers and the floor on a tile, at most `max`. E.g. `loot 8122 11685 plank 3` |
-| `put id x y [n]` | put an item into container `n` (default 1) on a tile |
+| `loot x y [filter words] [max]` | take everything (or names matching the filter, `*` = all) from all containers and the floor on a tile, at most `max`; also searches bags inside containers. E.g. `loot 8143 11727 firefighter axe 2` |
+| `put id x y [n]` | put an item into container `n` (default 1) on a tile; refuses up front if it's full |
 | `pack id [id...]` | move items from main inventory into your worn bag (`take` or `loot` them first) |
 | `drop id [id...]` | drop to the floor |
 | `eat id [fraction]` / `drink id [fraction]` | eat or drink (1 = all) |
@@ -115,8 +115,8 @@ C container   ~ water source   i items on the floor   ? not seen yet
 - If a turn silently does nothing, check `~/Zomboid/console.txt` for a Lua error.
 - `take`, `loot`, `craft`, `barricade` and `build` add a second result line that checks the outcome
   (`got all 3`, `1/1 planks up`, `missing: Plank #123`). Trust that line, not the first "ok".
-- Walking out through a locked door with its key unlocks it and leaves it that way. Check the
-  `fort:` line after coming home and `lock` the door again.
+- Walking through a locked door with its key unlocks it and leaves it that way. `home` locks
+  the base's doors again on arrival; after any other return, check the `fort:` line.
 - `OVERLOADED` in the summary means over 1.25× your carry limit: you're slow, which is what gets
   you caught. Carry 3–4 planks (3 kg each) per trip.
 - No skill yet? A log fence (2 logs + 2 rags) needs none: `chop` a tree, stand by the logs, `build LogFence`.

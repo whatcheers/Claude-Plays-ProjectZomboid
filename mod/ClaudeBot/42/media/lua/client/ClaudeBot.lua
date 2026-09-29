@@ -739,19 +739,27 @@ end
 B.cmds.loot = function(p, a)
 	local sq = sqAt(num(a[1]), num(a[2]), math.floor(p:getZ()))
 	if not sq then error("no square") end
-	-- loot x y [filter] [max]: filter "*" matches everything
-	local filter = a[3] and a[3] ~= "*" and a[3]:lower()
-	local max = tonumber(a[4]) or math.huge
+	-- loot x y [filter words...] [max]: the filter can be several words ("firefighter axe");
+	-- a trailing number caps how many; "*" or no filter matches everything
+	local words = {}
+	for i = 3, #a do words[#words + 1] = a[i] end
+	local max = math.huge
+	if #words > 0 and tonumber(words[#words]) then max = tonumber(table.remove(words)) end
+	local filter = #words > 0 and table.concat(words, " "):lower() or nil
+	if filter == "*" then filter = nil end
 	local n, taken = 0, {}
 	local function match(it) return not filter or it:getDisplayName():lower():find(filter, 1, true) or it:getFullType():lower():find(filter, 1, true) end
-	for _, e in ipairs(B.containersOn(sq)) do
-		local items = e.c:getItems()
+	-- also look inside bags in the container (garbage bags in dumpsters, purses in wardrobes)
+	local function scan(c, depth)
+		local items = c:getItems()
 		local list = {}
 		for i = 0, items:size() - 1 do list[#list + 1] = items:get(i) end
 		for _, it in ipairs(list) do
-			if n < max and match(it) then toInventory(p, it, e.c, nil); n = n + 1; taken[#taken + 1] = { it = it } end
+			if n < max and match(it) then toInventory(p, it, c, nil); n = n + 1; taken[#taken + 1] = { it = it }
+			elseif filter and depth < 2 and instanceof(it, "InventoryContainer") then scan(it:getInventory(), depth + 1) end
 		end
 	end
+	for _, e in ipairs(B.containersOn(sq)) do scan(e.c, 0) end
 	for _, wo in ipairs(B.floorItems(sq)) do
 		local it = wo:getItem()
 		if n < max and match(it) then toInventory(p, it, nil, wo); n = n + 1; taken[#taken + 1] = { it = it } end
@@ -765,9 +773,16 @@ B.cmds.put = function(p, a)
 	local cs = B.containersOn(sq)
 	local e = cs[tonumber(a[4]) or 1]
 	if not e then error("no container there") end
+	-- a full container refuses the transfer silently, so check first and after
+	if not try(function() return e.c:hasRoomFor(p, it) end) then
+		error(e.kind .. " is full (" .. r2(e.c:getCapacityWeight()) .. "/" .. r2(e.c:getEffectiveCapacity(p)) .. " kg); try another container")
+	end
 	if p:isEquipped(it) then Q(ISUnequipAction:new(p, it, 50)) end
 	luautils.walkToContainer(e.c, 0)
 	Q(ISInventoryTransferAction:new(p, it, it:getContainer(), e.c))
+	Q(ClaudeBotCall:new(p, "put", function(p)
+		if it:getContainer() ~= e.c then error(it:getDisplayName() .. " did not go into the " .. e.kind) end
+	end))
 	return "putting " .. it:getDisplayName()
 end
 -- pack id [id...]: move items into the worn (or held) bag
@@ -1177,8 +1192,14 @@ function B.bashTick(p)
 	local w = p:getPrimaryHandItem()
 	if w and instanceof(w, "HandWeapon") and w:isRanged() then B.bash = nil; B.endTurn("can't bash with a gun in hand: equip a melee weapon"); return end
 	b.swings = b.swings + 1
+	-- a zombie on the ground only takes a downward swing; a normal one passes over it
+	B.aimFloor(p, z)
 	p:setIsAiming(true)
 	p:DoAttack(0)
+end
+function B.aimFloor(p, z)
+	local down = z and (try(function() return z:isOnFloor() end) or false) or false
+	try(function() p:setAimAtFloor(down) end)
 end
 
 -- shove (or stomp, if it's down) with whatever is in hand; never fires a gun
@@ -1186,6 +1207,7 @@ function B.shove(p, z)
 	p:faceThisObject(z)
 	if p:isAttackStarted() or try(function() return p:isPerformingAttackAnimation() end) then return end
 	try(function() p:setDoShove(true) end)
+	B.aimFloor(p, z)
 	p:DoAttack(0)
 end
 
@@ -1194,6 +1216,7 @@ function B.endFight(p, ok, msg)
 	local f = B.fight
 	B.fight = nil
 	p:setIsAiming(false)
+	B.aimFloor(p, nil)
 	local kills = 0
 	for z in pairs(f.targets or {}) do if z:isDead() then kills = kills + 1 end end
 	B.kills = (B.kills or 0) + kills
@@ -1497,6 +1520,11 @@ function B.finishTask(ok, msg)
 		B.endTurn("task failed: " .. t.line)
 		return
 	end
+	-- walking in through a locked door with its key unlocks it and leaves it that way
+	if t.home then
+		local n = B.lockBase(P())
+		if n > 0 then B.rlog("locking " .. n .. " base door" .. (n > 1 and "s" or "") .. " behind you") end
+	end
 	if B.pending and t.resumeFrom <= #B.pending then B.resumeFrom = t.resumeFrom; B.resumePending() end
 end
 
@@ -1523,6 +1551,15 @@ end
 local TURNS = { 0, 0.6, -0.6, 1.2, -1.2 }
 local LEGS = { 50, 30, 30, 20, 20 }
 local function travelTick(t, p)
+	-- a target on a counter or other blocked tile can never be reached; aim beside it
+	if not t.checked then
+		t.checked = true
+		local sq = sqAt(t.x, t.y, t.z)
+		if sq and not try(function() return sq:isFree(false) end) then
+			local fx, fy = freeNear(t.x, t.y, t.z, 2)
+			if fx then t.x, t.y = fx, fy end
+		end
+	end
 	local px, py, pz = p:getX(), p:getY(), math.floor(p:getZ())
 	local dx, dy = t.x + 0.5 - px, t.y + 0.5 - py
 	local d = math.sqrt(dx * dx + dy * dy)
@@ -1598,7 +1635,9 @@ end
 B.cmds.home = function(p, a, line)
 	local b = B.getBase()
 	if not b then error("no base yet: setbase first") end
-	startTask(B.newTravel(b.x, b.y, b.z), line)
+	local t = B.newTravel(b.x, b.y, b.z)
+	t.home = true
+	startTask(t, line)
 	return "heading home to " .. b.x .. "," .. b.y .. "," .. b.z
 end
 
@@ -2000,6 +2039,33 @@ function B.fortInfo(p, bdef)
 		end
 	end
 	return rows, string.format("%d/%d windows boarded, %d/%d doors locked", boarded, win, locked, doors)
+end
+-- queue closing and locking every unlocked exterior base door you carry the key for
+function B.lockBase(p)
+	local bdef = B.baseBuilding(p)
+	if not bdef then return 0 end
+	local n = 0
+	for z = 0, maxLevel(bdef) do
+		for x = bdef:getX() - 1, bdef:getX() + bdef:getW() + 1 do
+			for y = bdef:getY() - 1, bdef:getY() + bdef:getH() + 1 do
+				local sq = sqAt(x, y, z)
+				for _, o in ipairs(sq and objList(sq) or {}) do
+					local other = isDoor(o) and (o:getNorth() and sqAt(x, y - 1, z) or sqAt(x - 1, y, z))
+					if other and sq:isOutside() ~= other:isOutside() and not try(function() return o:isLocked() end) then
+						local kid = try(function() return o:getKeyId() end)
+						if kid and kid ~= -1 and try(function() return p:getInventory():haveThisKeyId(kid) end) then
+							if luautils.walkAdjWindowOrDoor(p, o:getSquare(), o) then
+								if try(function() return o:IsOpen() end) then Q(ISOpenCloseDoor:new(p, o)) end
+								Q(ISLockDoor:new(p, o, true))
+								n = n + 1
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+	return n
 end
 function B.baseBuilding(p)
 	local b = B.getBase()

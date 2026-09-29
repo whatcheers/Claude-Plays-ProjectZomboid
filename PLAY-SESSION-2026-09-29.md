@@ -47,3 +47,40 @@ Recovered Hacksaw #1783680016, Handiknife #986314897, and Rope #255335180 from a
 Policy now intentionally has `melee=off`: new threats pause for agent inspection. Keep that cautious policy until grounded combat is investigated. `find` searches nested bags, but `loot` only matches top-level items; approach, inspect `near`, and use `take <id>` for nested items.
 
 Dressing removal revealed that `bp:bitten()` returns false under bandages. That caused a false new-bite alarm when the old dressing came off. Fixed bite counting and wound reporting to also use `getBiteTime()>0`, verified against the actual covered wound (timer about 65). The covered_bite.lua regression failed before, passed after, and checks that an additional bite still increases the count. The alarm during care was the OLD bite, not another attack.
+
+## Claude supply run (same day, later)
+
+Goal from the user: stock the base for the *next* survivor. This one is infected
+(zombie_infection 1.66 → 5.67 over ~3 game hours) and won't last.
+
+State at the end: July 10 12:38, inside the base, health 90.7, door locked,
+6/6 windows double-planked. Game saved.
+
+### Base supply manifest (Rosewood house, 8152–8158 × 11676–11685)
+
+| where | what |
+|---|---|
+| kitchen shelves 8157,11678 | Rice, White Beans (Dried), Canned Sardines, Canned Tuna, Canned Carrots, Peanut Butter |
+| kitchen counter 8157,11679 | 2 Cooking Pots + Kettle, **full of clean water (4.5 L)**; pans, utensils |
+| fridge 8155,11678 | Ham, radish, zucchini (these will rot) |
+| medicine cabinet 8155,11676 | **First Aid Kit**, Forceps, Bandage ×2, Adhesive Bandage ×2, Adhesive Tape ×2, Suture Needle ×2, Painkillers |
+| wardrobe 8152,11678 | **Padded Jacket** (bite protection), Kitchen Knife, Paring Knife, Water Bottle, Lighter, Painkillers, Alcohol Wipes, **Vehicle Key – Franklin Valuline** (van not located yet) |
+| dresser 8154,11684 | **3 Firefighter Axes** (13/13), Hatchet |
+| wardrobe 8156,11682 | Gas Can (for the van) |
+| wardrobe 8152,11677 | FULL (16/17 kg): hammer, saw, handiknife, rope, sewing kit, whetstone, pliers, older loot |
+| yard 8153,11666 | 2 logs, branches; log fence panel at 8154,11666 |
+
+Stocks nearby: ~30 planks at the carpenter shop crates 8122,11685-86; 20+ fire axes at the
+fire station 8136–8156,11727–11738; more gas cans at the car supply store 8123/8131,11645.
+
+### Code fixed during the run (all hit live, then verified live)
+
+- Combat: `setAimAtFloor` before swings/shoves, so zombies on the ground take a downward
+  swing or a stomp. A crawler that would have stalled died without tripping the 4-swing check.
+- `travel` aimed at a blocked tile (counter, shelf) now targets the nearest free tile.
+- `loot`: multi-word filters (`loot x y firefighter axe 2` took 3 before), and it searches
+  bags nested in containers (hatchet inside a dumpster's garbage bag).
+- `put` checks the container has room first ("wardrobe is full (15.97/17 kg)") and verifies
+  after; before, a full container silently refused and `put` said ok.
+- `home` locks the base's exterior doors you have keys for on arrival (walking in through a
+  locked door with its key leaves it unlocked; it happened every trip).
