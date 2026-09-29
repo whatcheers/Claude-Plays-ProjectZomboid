@@ -14,6 +14,7 @@ B.nextZid = B.nextZid or 1
 B.lastPoll = 0
 B.maxTurnMin = B.maxTurnMin or 120
 B.mapR = B.mapR or 12
+B.hurtPause = B.hurtPause or 8  -- health lost in one turn before it pauses as "hurt"
 
 local DIR = "claudebot/"
 
@@ -363,6 +364,13 @@ function B.state(reason)
 	s.wounds = wounds
 	s.weight = r2(p:getInventory():getCapacityWeight()) .. "/" .. r2(p:getMaxWeight())
 	s.inventory = containerItems(p:getInventory(), p, 0)
+	s.overloaded = p:getInventory():getCapacityWeight() > p:getMaxWeight() * 1.25
+	local home = B.baseBuilding and try(function() return B.baseBuilding(p) end)
+	local here = p:getCurrentSquare() and p:getCurrentSquare():getBuilding()
+	if home and here and here:getDef() == home then
+		local _, sum = B.fortInfo(p, home)
+		s.fort = sum
+	end
 	local ph = p:getPrimaryHandItem()
 	s.primary = ph and (ph:getDisplayName() .. " #" .. ph:getID()) or nil
 	local q = ISTimedActionQueue.getTimedActionQueue(p).queue
@@ -431,6 +439,11 @@ function B.state(reason)
 		end
 	end end
 	s.scan = B.scanResult; B.scanResult = nil
+	s.survey = B.surveyResult; B.surveyResult = nil
+	s.reflexes = B.reflexLog
+	s.task = B.task and try(function() return B.task:status(p) end) or nil
+	s.policy = B.policyString and B.policyString(B.policy) or nil
+	s.base = B.getBase and B.getBase() or nil
 	local ok, m = pcall(B.map, p, R)
 	if ok then s.map = m else s.mapErr = tostring(m) end
 	local room = p:getCurrentSquare() and p:getCurrentSquare():getRoom()
@@ -451,15 +464,20 @@ function ClaudeBotStep:update() end
 function ClaudeBotStep:start() end
 function ClaudeBotStep:stop() ISBaseTimedAction.stop(self) end
 function ClaudeBotStep:perform()
+	if self.idx then
+		-- lines after a running goal command wait for it (B.finishTask re-queues them)
+		if B.task and self.idx >= B.task.resumeFrom then ISBaseTimedAction.perform(self); return end
+		B.pendingIdx = self.idx
+	end
 	self:beginAddingActions()
-	local ok, msg = pcall(B.cmds[self.verb], self.character, self.args, self.line)
+	local ok, msg = pcall(B.cmds[self.verb] or B.immediate[self.verb], self.character, self.args, self.line)
 	self:endAddingActions()
 	B.res(self.line, ok, msg)
 	ISBaseTimedAction.perform(self)
 end
-function ClaudeBotStep:new(p, line, verb, args)
+function ClaudeBotStep:new(p, line, verb, args, idx)
 	local o = ISBaseTimedAction.new(self, p)
-	o.line, o.verb, o.args = line, verb, args
+	o.line, o.verb, o.args, o.idx = line, verb, args, idx
 	o.maxTime = 1
 	o.stopOnWalk, o.stopOnRun, o.stopOnAim = false, false, false
 	return o
@@ -492,8 +510,8 @@ end
 ---------------------------------------------------------------- commands
 local Q = function(a) ISTimedActionQueue.add(a) end
 local function num(v, name) local n = tonumber(v); if not n then error("need number for " .. (name or "arg")) end return n end
-local function itemArg(p, v)
-	local it, cont, wo = B.findItem(p, num(v, "item id"), 4)
+local function itemArg(p, v, r)
+	local it, cont, wo = B.findItem(p, num(v, "item id"), r or 4)
 	if not it then error("item #" .. tostring(v) .. " not found nearby") end
 	return it, cont, wo
 end
@@ -524,6 +542,24 @@ B.cmds = {}
 B.immediate = {}
 
 B.immediate.look = function(p) return "ok" end
+
+-- light [on|off]: flip every light switch in the current room
+B.immediate.light = function(p, a)
+	local want = a[1] ~= "off"
+	local room = p:getSquare() and p:getSquare():getRoom()
+	if not room then error("not in a room") end
+	local px, py, pz = math.floor(p:getX()), math.floor(p:getY()), math.floor(p:getZ())
+	local n = 0
+	for dx = -20, 20 do for dy = -20, 20 do
+		local sq = sqAt(px + dx, py + dy, pz)
+		if sq and sq:getRoom() == room then
+			for _, o in ipairs(objList(sq)) do
+				if instanceof(o, "IsoLightSwitch") and o:isActivated() ~= want then o:toggle(); n = n + 1 end
+			end
+		end
+	end end
+	return "switched " .. n .. " light(s) " .. (want and "on" or "off") .. (getWorld():isHydroPowerOn() and "" or " (no grid power)")
+end
 
 -- eval: runs claudebot/eval.lua (written by pz.py) via reloadLuaFile; the
 -- snippet sets ClaudeBot.evalResult. Stand-in for loadstring, which B42 disables.
@@ -585,7 +621,35 @@ B.cmds.fight = function(p, a)
 	B.fight = { untilMin = nowMin() + (tonumber(a[1]) or 5), hunt = a[2] ~= "hold" }
 	return B.fight.hunt and "hunting" or "holding position"
 end
-B.immediate.maxturn = function(p, a) B.maxTurnMin = num(a[1]); return "max turn " .. B.maxTurnMin .. " min" end
+-- reload [id]: equip (if given) and load the gun in hand from loose rounds / magazines in inventory
+B.cmds.reload = function(p, a)
+	local g = a[1] and itemArg(p, a[1]) or p:getPrimaryHandItem()
+	if not g or not instanceof(g, "HandWeapon") or not g:isRanged() then error("no gun") end
+	if p:getPrimaryHandItem() ~= g then
+		ISInventoryPaneContextMenu.equipWeapon(g, true, g:isTwoHandWeapon(), 0)
+	end
+	ISReloadWeaponAction.BeginAutomaticReload(p, g)
+	return "reloading " .. g:getDisplayName() .. " (" .. g:getCurrentAmmoCount() .. "/" .. g:getMaxAmmo() .. ")"
+end
+
+-- bash x y [minutes]: walk up to a door or window and hit it until it breaks. Loud.
+B.cmds.bash = function(p, a)
+	local sq = sqAt(num(a[1]), num(a[2]), math.floor(p:getZ()))
+	local o = findOn(sq, function(o) return isDoor(o) or isWindow(o) end)
+	if not o then error("no door or window at " .. a[1] .. "," .. a[2]) end
+	if not luautils.walkAdjWindowOrDoor(p, sq, o, true) then error("can't reach it") end
+	Q(ClaudeBotStep:new(p, "bash", "_bashgo", { a[1], a[2], a[3] }))
+	return "going to bash " .. (try(function() return o:getObjectName() end) or "it")
+end
+B.cmds._bashgo = function(p, a)
+	local sq = sqAt(num(a[1]), num(a[2]), math.floor(p:getZ()))
+	local o = findOn(sq, function(o) return isDoor(o) or isWindow(o) end)
+	if not o then return "already gone" end
+	B.bash = { sq = sq, obj = o, swings = 0, untilMin = nowMin() + (tonumber(a[3]) or 15) }
+	return "swinging"
+end
+B.immediate.maxturn =function(p, a) B.maxTurnMin = num(a[1]); return "max turn " .. B.maxTurnMin .. " min" end
+B.immediate.hurtpause = function(p, a) B.hurtPause = num(a[1]); return "pause after losing " .. B.hurtPause .. " health" end
 
 function B.path(p, x, y, z)
 	local act = ISPathFindAction:pathToLocationF(p, x + 0.5, y + 0.5, z)
@@ -624,34 +688,61 @@ B.cmds.window = function(p, a)
 	else error("window verb: open|close|smash|clearglass|climb") end
 	return verb .. " window"
 end
+-- after the transfers, check every item really landed in main inventory; retry the missing
+-- ones once (a hit or a full hand drops the queue mid-way), then name what's still missing
+function B.verifyTaken(p, items, line, retried)
+	Q(ClaudeBotCall:new(p, line, function(p)
+		local inv, missing = p:getInventory(), {}
+		for _, e in ipairs(items) do
+			if e.it:getContainer() ~= inv then missing[#missing + 1] = e end
+		end
+		if #missing == 0 then return "got all " .. #items end
+		if not retried then
+			for _, e in ipairs(missing) do
+				local it, cont, wo = B.findItem(p, e.it:getID(), 25)
+				if it then toInventory(p, it, cont, wo) end
+			end
+			B.verifyTaken(p, missing, line, true)
+			return nil
+		end
+		local names = {}
+		for _, e in ipairs(missing) do names[#names + 1] = e.it:getDisplayName() .. " #" .. e.it:getID() end
+		error("missing: " .. table.concat(names, ", "))
+	end))
+end
 B.cmds.take = function(p, a)
-	local names = {}
+	local names, items = {}, {}
 	for _, v in ipairs(a) do
-		local it, cont, wo = itemArg(p, v)
+		-- far reach, so ids from survey work: it walks there
+		local it, cont, wo = itemArg(p, v, 25)
 		toInventory(p, it, cont, wo)
 		names[#names + 1] = it:getDisplayName()
+		items[#items + 1] = { it = it }
 	end
+	B.verifyTaken(p, items, "take")
 	return "taking " .. table.concat(names, ", ")
 end
 B.cmds.loot = function(p, a)
 	local sq = sqAt(num(a[1]), num(a[2]), math.floor(p:getZ()))
 	if not sq then error("no square") end
-	local filter = a[3] and a[3]:lower()
-	local n = 0
+	-- loot x y [filter] [max]: filter "*" matches everything
+	local filter = a[3] and a[3] ~= "*" and a[3]:lower()
+	local max = tonumber(a[4]) or math.huge
+	local n, taken = 0, {}
+	local function match(it) return not filter or it:getDisplayName():lower():find(filter, 1, true) or it:getFullType():lower():find(filter, 1, true) end
 	for _, e in ipairs(B.containersOn(sq)) do
 		local items = e.c:getItems()
 		local list = {}
 		for i = 0, items:size() - 1 do list[#list + 1] = items:get(i) end
 		for _, it in ipairs(list) do
-			if not filter or it:getDisplayName():lower():find(filter, 1, true) or it:getFullType():lower():find(filter, 1, true) then
-				toInventory(p, it, e.c, nil); n = n + 1
-			end
+			if n < max and match(it) then toInventory(p, it, e.c, nil); n = n + 1; taken[#taken + 1] = { it = it } end
 		end
 	end
 	for _, wo in ipairs(B.floorItems(sq)) do
 		local it = wo:getItem()
-		if not filter or it:getDisplayName():lower():find(filter, 1, true) then toInventory(p, it, nil, wo); n = n + 1 end
+		if n < max and match(it) then toInventory(p, it, nil, wo); n = n + 1; taken[#taken + 1] = { it = it } end
 	end
+	if n > 0 then B.verifyTaken(p, taken, "loot") end
 	return "looting " .. n .. " items"
 end
 B.cmds.put = function(p, a)
@@ -664,6 +755,23 @@ B.cmds.put = function(p, a)
 	luautils.walkToContainer(e.c, 0)
 	Q(ISInventoryTransferAction:new(p, it, it:getContainer(), e.c))
 	return "putting " .. it:getDisplayName()
+end
+-- pack id [id...]: move items into the worn (or held) bag
+B.cmds.pack = function(p, a)
+	local bag = p:getClothingItem_Back() or p:getSecondaryHandItem()
+	if not bag or not instanceof(bag, "InventoryContainer") then error("no worn bag") end
+	local dest = bag:getItemContainer()
+	for _, v in ipairs(a) do
+		local it, cont, wo = itemArg(p, v)
+		if wo then
+			toInventory(p, it, cont, wo)
+			Q(ISInventoryTransferAction:new(p, it, p:getInventory(), dest))
+		elseif cont ~= dest then
+			if not cont:isInCharacterInventory(p) then luautils.walkToContainer(cont, 0) end
+			Q(ISInventoryTransferAction:new(p, it, cont, dest))
+		end
+	end
+	return "packing " .. #a .. " into " .. bag:getDisplayName()
 end
 B.cmds.drop = function(p, a)
 	local items = {}
@@ -736,30 +844,395 @@ B.cmds.wait = function(p, a)
 	return "waiting"
 end
 
+-- runs fn(p) when it reaches the front of the queue (after walks/transfers queued before it)
+ClaudeBotCall = ISBaseTimedAction:derive("ClaudeBotCall")
+function ClaudeBotCall:isValid() return true end
+function ClaudeBotCall:perform()
+	self:beginAddingActions()
+	local ok, msg = pcall(self.fn, self.character)
+	self:endAddingActions()
+	if not ok or msg then B.res(self.line, ok, msg) end
+	ISBaseTimedAction.perform(self)
+end
+function ClaudeBotCall:new(p, line, fn)
+	local o = ISBaseTimedAction.new(self, p)
+	o.line, o.fn, o.maxTime = line, fn, 1
+	o.stopOnWalk, o.stopOnRun, o.stopOnAim = false, false, false
+	return o
+end
+
+-- item counts by name in main inventory, and a "+2 Rag, -1 Tank Top" diff of two of them
+function B.invCounts(p)
+	local t, items = {}, p:getInventory():getItems()
+	for i = 0, items:size() - 1 do local n = items:get(i):getDisplayName(); t[n] = (t[n] or 0) + 1 end
+	return t
+end
+function B.invDiff(a, b)
+	local out = {}
+	for n, c in pairs(b) do if c > (a[n] or 0) then out[#out + 1] = "+" .. (c - (a[n] or 0)) .. " " .. n end end
+	for n, c in pairs(a) do if c > (b[n] or 0) then out[#out + 1] = "-" .. (c - (b[n] or 0)) .. " " .. n end end
+	table.sort(out)
+	return table.concat(out, ", ")
+end
+
+-- recipes id: what the right-click menu offers to craft from item #id
+local function craftList(p, it)
+	local conts = ISInventoryPaneContextMenu.getContainers(p)
+	-- the game only searches worn/equipped bags; a carried bag's items would show nothing
+	local own = it:getContainer()
+	if own and not conts:contains(own) then conts:add(own) end
+	local list = CraftRecipeManager.getUniqueRecipeItems(it, p, conts)
+	local out = {}
+	for i = 0, (list and list:size() or 0) - 1 do
+		local r = list:get(i)
+		local logic = HandcraftLogic.new(p, nil, nil)
+		logic:setIsoObject(logic:findCraftSurface(p, 2))
+		logic:setContainers(conts)
+		logic:setRecipeFromContextClick(r, it)
+		out[#out + 1] = { recipe = r, name = getText(r:getTranslationName()), can = logic:canPerformCurrentRecipe() }
+	end
+	return out
+end
+B.immediate.recipes = function(p, a)
+	local it = itemArg(p, a[1])
+	local rs = craftList(p, it)
+	if #rs == 0 then return "nothing craftable from " .. it:getDisplayName() end
+	local s = {}
+	for i, r in ipairs(rs) do s[#s + 1] = i .. ") " .. r.name .. (r.can and "" or " [missing stuff]") end
+	return it:getDisplayName() .. ": " .. table.concat(s, "; ")
+end
+-- craft id [n]: do recipe n (default 1) from `recipes id`
+B.cmds.craft = function(p, a)
+	local it, cont, wo = itemArg(p, a[1])
+	local n = tonumber(a[2]) or 1
+	if wo or not cont:isInCharacterInventory(p) then toInventory(p, it, cont, wo) end
+	Q(ClaudeBotCall:new(p, "craft", function(p)
+		local r = craftList(p, it)[n]
+		if not r then error("no recipe " .. n .. " for " .. it:getDisplayName()) end
+		if not r.can then error("can't do " .. r.name .. " (missing tools or materials)") end
+		local before = B.invCounts(p)
+		ISInventoryPaneContextMenu.OnNewCraft(it, r.recipe, p:getPlayerNum(), false)
+		Q(ClaudeBotCall:new(p, "craft", function(p)
+			local d = B.invDiff(before, B.invCounts(p))
+			if d == "" then error(r.name .. " made nothing (interrupted?)") end
+			return r.name .. ": " .. d
+		end))
+		return "crafting " .. r.name
+	end))
+	return "craft queued"
+end
+
+-- barricade x y [n]: nail n planks (default 1, max 4 per side) over the window or door on
+-- that tile, from whichever side you're standing on. Needs a hammer, planks and 2 loose Nails
+-- each (`craft` a Box of Nails open first). Puts your weapon back in hand afterwards.
+local function hasTag(it, tag) return try(function() return it:hasTag(tag) end) end
+-- vanilla ISBarricadeAction:isValid checks hasEquippedTag(ItemType.HAMMER), which is nil in
+-- this build, so it always fails; same action with the hammer check fixed
+ClaudeBotBarricade = ISBarricadeAction:derive("ClaudeBotBarricade")
+function ClaudeBotBarricade:isValid()
+	local p, o = self.character, self.item
+	if not instanceof(o, "BarricadeAble") or o:getObjectIndex() == -1 then return false end
+	local b = o:getBarricadeForCharacter(p)
+	if b and not b:canAddPlank() then return false end
+	if not p:hasEquippedTag(ItemTag.HAMMER) or not p:hasEquipped("Plank") then return false end
+	if p:getInventory():getItemCount("Base.Nails", true) < 2 then return false end
+	return true
+end
+B.cmds.barricade = function(p, a)
+	local sq = sqAt(num(a[1]), num(a[2]), math.floor(p:getZ()))
+	local o = findOn(sq, function(o) return isWindow(o) or isDoor(o) end)
+	if not o then error("no window or door at " .. a[1] .. "," .. a[2]) end
+	local inv = p:getInventory()
+	local hammer = p:getPrimaryHandItem()
+	if not (hammer and hasTag(hammer, ItemTag.HAMMER)) then
+		hammer = inv:getFirstTagEvalRecurse(ItemTag.HAMMER, function(it) return not it:isBroken() end)
+	end
+	if not hammer then error("no hammer") end
+	local planks = inv:getAllTypeRecurse("Plank")
+	local nails = inv:getItemCountRecurse("Nails")
+	local box = inv:getFirstTypeRecurse("NailsBox")
+	local n = math.min(tonumber(a[3]) or 1, planks:size(), math.floor((nails + (box and 100 or 0)) / 2))
+	if n < 1 then error("need a plank and 2 nails (have " .. planks:size() .. " planks, " .. nails .. " nails)") end
+	local b = try(function() return o:getBarricadeForCharacter(p) end)
+	local had = b and b:getNumPlanks() or 0
+	n = math.min(n, 4 - had)
+	if n < 1 then error("already 4 planks on this side") end
+	if nails < 2 * n and box then
+		Q(ClaudeBotCall:new(p, "barricade", function(p)
+			for _, r in ipairs(craftList(p, box)) do
+				if r.can then ISInventoryPaneContextMenu.OnNewCraft(box, r.recipe, p:getPlayerNum(), false); return "opened a Box of Nails" end
+			end
+			error("could not open the Box of Nails")
+		end))
+	end
+	local weapon = p:getPrimaryHandItem()
+	if not luautils.walkAdjWindowOrDoor(p, o:getSquare(), o) then error("can't reach it") end
+	if hammer:getContainer() ~= inv then Q(ISInventoryTransferAction:new(p, hammer, hammer:getContainer(), inv)) end
+	Q(ISEquipWeaponAction:new(p, hammer, 50, true, false))
+	for i = 0, n - 1 do
+		local pl = planks:get(i)
+		if pl:getContainer() ~= inv then Q(ISInventoryTransferAction:new(p, pl, pl:getContainer(), inv)) end
+		Q(ISEquipWeaponAction:new(p, pl, 50, false, false))
+		Q(ClaudeBotBarricade:new(p, o, false, false))
+	end
+	-- the vanilla action fails silently (see ClaudeBotBarricade), so count what actually went up
+	Q(ClaudeBotCall:new(p, "barricade", function(p)
+		local nb = try(function() return o:getBarricadeForCharacter(p) end)
+		local now = nb and nb:getNumPlanks() or 0
+		if now - had < n then error((now - had) .. "/" .. n .. " planks went up (now " .. now .. " on this side)") end
+		return n .. "/" .. n .. " planks up (now " .. now .. " on this side)"
+	end))
+	if weapon and weapon ~= hammer then
+		Q(ISEquipWeaponAction:new(p, weapon, 50, true, try(function() return weapon:isTwoHandWeapon() end) or false))
+	end
+	return "barricading " .. (isWindow(o) and "window" or "door") .. " at " .. a[1] .. "," .. a[2] .. " with " .. n .. " plank" .. (n > 1 and "s" or "")
+end
+
+-- lock x y [off]: close and lock (or unlock) the door on that tile; needs its key on you
+B.cmds.lock = function(p, a)
+	local o = findOn(sqAt(num(a[1]), num(a[2]), math.floor(p:getZ())), isDoor)
+	if not o then error("no door at " .. a[1] .. "," .. a[2]) end
+	local lock = a[3] ~= "off"
+	if not luautils.walkAdjWindowOrDoor(p, o:getSquare(), o) then error("can't reach the door") end
+	if lock and try(function() return o:IsOpen() end) then Q(ISOpenCloseDoor:new(p, o)) end
+	Q(ISLockDoor:new(p, o, lock))
+	return (lock and "locking" or "unlocking") .. " door at " .. a[1] .. "," .. a[2]
+end
+
+-- chop x y: fell the tree on that tile with your best axe (logs drop around it)
+B.cmds.chop = function(p, a)
+	local sq = sqAt(num(a[1]), num(a[2]), math.floor(p:getZ()))
+	local tree = sq and try(function() return sq:getTree() end)
+	if not tree then error("no tree at " .. a[1] .. "," .. a[2]) end
+	local axe = p:getInventory():getFirstEvalRecurse(function(it) return not it:isBroken() and try(function() return it:hasTag(ItemTag.CHOP_TREE) end) end)
+	if not axe then error("no axe") end
+	ISWorldObjectContextMenu.doChopTree(p, tree)
+	return "chopping the tree at " .. a[1] .. "," .. a[2] .. " with " .. axe:getDisplayName()
+end
+
+-- build Entity x y [w|n]: place a build-menu entity (e.g. LogFence) on a tile, facing its
+-- west or north edge (default w). Materials count from inventory and the 8 tiles around
+-- where you stand, so drop heavy ones (logs) next to the spot first.
+function B.objectInfo(name)
+	local infos = SpriteConfigManager.GetObjectInfoList()
+	for i = 0, infos:size() - 1 do
+		local info = infos:get(i)
+		if info:getName() == name or (info:getScript() and info:getScript():getName() == name) then return info end
+	end
+end
+B.cmds.build = function(p, a)
+	local name = a[1] or error("build what? e.g. build LogFence x y w")
+	local info = B.objectInfo(name)
+	if not info then error("no buildable entity named " .. name) end
+	local x, y, z = num(a[2]), num(a[3]), math.floor(p:getZ())
+	local sq = sqAt(x, y, z)
+	if not sq then error("square not loaded") end
+	local be = ISBuildIsoEntity:new(p, info, a[4] == "n" and 2 or 1, ISInventoryPaneContextMenu.getContainers(p))
+	be.player = p:getPlayerNum()
+	local face = be:getFace()
+	if not face then error(name .. " has no buildable face") end
+	be.north = be.nSprite == 2
+	-- the cursor's render pass normally works out whether it's wall-like (walk to the edge
+	-- rather than onto a free tile); do the same from the face's first sprite
+	for xx = 0, face:getWidth() - 1 do for yy = 0, face:getHeight() - 1 do
+		local ti = face:getTileInfo(xx, yy, 0)
+		local spr = ti and ti:getSpriteName() and getSprite(ti:getSpriteName())
+		if spr and be.isWallLike == nil then
+			local pr = spr:getProperties()
+			be.isWallLike = pr:has(IsoPropertyType.WALL_N) or pr:has(IsoPropertyType.WALL_W) or pr:has(IsoPropertyType.WALL_N_TRANS) or pr:has(IsoPropertyType.WALL_W_TRANS)
+		end
+	end end
+	if not be:isValid(sq) then error("can't build " .. name .. " at " .. x .. "," .. y .. " (blocked, or missing materials/skill within reach)") end
+	-- the sprites this face places, to check the result by (object counts also move when
+	-- dropped items or materials come and go)
+	local sprites = {}
+	for xx = 0, face:getWidth() - 1 do for yy = 0, face:getHeight() - 1 do
+		local ti = face:getTileInfo(xx, yy, 0)
+		if ti and ti:getSpriteName() then sprites[ti:getSpriteName()] = true end
+	end end
+	local function count()
+		local n = 0
+		for _, o in ipairs(objList(sq)) do
+			local s = o:getSprite() and o:getSprite():getName()
+			if s and sprites[s] then n = n + 1 end
+		end
+		return n
+	end
+	local before = count()
+	be:tryBuild(x, y, z)
+	Q(ClaudeBotCall:new(p, "build", function(p)
+		if count() > before then return name .. " built at " .. x .. "," .. y end
+		error(name .. " not built (interrupted, or materials not in reach)")
+	end))
+	return "building " .. name .. " at " .. x .. "," .. y .. (be.north and " (north edge)" or " (west edge)")
+end
+
+-- sleep [x y | floor]: walk to the nearest bed on this floor (or the one at x y) and sleep;
+-- no bed in reach means the floor. Uses the game's own sleep code, minus the confirm dialog.
+local function isBed(o) return try(function() return o:getProperties():has(IsoFlagType.bed) end) end
+function B.findBed(p, r)
+	local px, py, z = math.floor(p:getX()), math.floor(p:getY()), math.floor(p:getZ())
+	local best, bd
+	for dx = -r, r do for dy = -r, r do
+		local sq = sqAt(px + dx, py + dy, z)
+		local bed = sq and findOn(sq, isBed)
+		if bed then
+			local d = dx * dx + dy * dy
+			if not bd or d < bd then best, bd = bed, d end
+		end
+	end end
+	return best
+end
+function B.sleepBlocker(p)
+	local st = p:getStats()
+	if st:getNumVisibleZombies() > 0 or st:getNumChasingZombies() > 0 or st:getNumVeryCloseZombies() > 0 then return "zombies around" end
+	if p:getSleepingTabletEffect() < 2000 then
+		if p:getMoodles():getMoodleLevel(MoodleType.PAIN) >= 2 and st:get(CharacterStat.FATIGUE) <= 0.85 then return "too much pain" end
+		if p:getMoodles():getMoodleLevel(MoodleType.PANIC) >= 1 then return "panicking" end
+	end
+	return nil
+end
+ClaudeBotSleep = ISBaseTimedAction:derive("ClaudeBotSleep")
+function ClaudeBotSleep:isValid() return true end
+function ClaudeBotSleep:perform()
+	ISBaseTimedAction.perform(self)
+	local p = self.character
+	local why = B.sleepBlocker(p)
+	if why then B.res("sleep", false, "can't sleep: " .. why); return end
+	p:setVariable("ExerciseStarted", false)
+	p:setVariable("ExerciseEnded", true)
+	ISWorldObjectContextMenu.onSleepWalkToComplete(p:getPlayerNum(), self.bed)
+	B.res("sleep", p:isAsleep(), p:isAsleep() and ("asleep " .. (self.bed and "in bed" or "on the floor")) or "didn't fall asleep")
+end
+function ClaudeBotSleep:new(p, bed)
+	local o = ISBaseTimedAction.new(self, p)
+	o.bed, o.maxTime = bed, 1
+	o.stopOnWalk, o.stopOnRun, o.stopOnAim = false, false, false
+	return o
+end
+B.cmds.sleep = function(p, a)
+	local why = B.sleepBlocker(p)
+	if why then error("can't sleep: " .. why) end
+	local bed
+	if a[1] == "floor" then bed = nil
+	elseif a[1] then
+		bed = findOn(sqAt(num(a[1]), num(a[2]), math.floor(p:getZ())), isBed)
+		if not bed then error("no bed at " .. a[1] .. "," .. a[2]) end
+	else bed = B.findBed(p, 12) end
+	if bed and not AdjacentFreeTileFinder.isTileOrAdjacent(p:getCurrentSquare(), bed:getSquare()) then
+		if not luautils.walkAdj(p, bed:getSquare(), true) then error("can't reach the bed") end
+	end
+	Q(ClaudeBotSleep:new(p, bed))
+	return bed and ("going to bed at " .. bed:getX() .. "," .. bed:getY()) or "sleeping on the floor"
+end
+
 ---------------------------------------------------------------- fighting
 function B.attack(p, z)
 	p:faceThisObject(z)
 	if p:isAttackStarted() or try(function() return p:isPerformingAttackAnimation() end) then return end
 	if B.attackImpl then return B.attackImpl(p, z) end
+	local w = p:getPrimaryHandItem()
+	if w and instanceof(w, "HandWeapon") and w:isRanged() then
+		if w:getCurrentAmmoCount() == 0 and not w:isRoundChambered() then
+			B.fight = nil; B.endTurn("out of ammo: reload"); return
+		end
+		-- the game only allocates the BallisticsController while the player has been aiming a
+		-- firearm for a frame; DoAttack without one crashes CombatManager (NPE) and exits to menu
+		p:setIsAiming(true)
+		p:updateBallistics()
+		if not p:getBallisticsController() then
+			B.fight = nil; B.endTurn("gun not ready (no ballistics controller)"); return
+		end
+	end
 	p:setIsAiming(true)
 	p:DoAttack(0)
 end
 
+-- bash: swing at a door/window/barricade until it breaks (see B.cmds.bash)
+function B.bashTick(p)
+	local b = B.bash
+	local gone = true
+	for _, o in ipairs(objList(b.sq)) do if o == b.obj then gone = false end end
+	if gone or (isDoor(b.obj) and try(function() return b.obj:IsOpen() end)) then
+		B.bash = nil; p:setIsAiming(false); B.res("bash", true, "broke through after " .. b.swings .. " swings"); return
+	end
+	if nowMin() > b.untilMin then B.bash = nil; p:setIsAiming(false); B.res("bash", false, "gave up after " .. b.swings .. " swings"); return end
+	if p:getStats():get(CharacterStat.ENDURANCE) < 0.3 then B.bash = nil; B.endTurn("exhausted"); return end
+	p:faceThisObject(b.obj)
+	if p:isAttackStarted() or try(function() return p:isPerformingAttackAnimation() end) then return end
+	local w = p:getPrimaryHandItem()
+	if w and instanceof(w, "HandWeapon") and w:isRanged() then B.bash = nil; B.endTurn("can't bash with a gun in hand: equip a melee weapon"); return end
+	b.swings = b.swings + 1
+	p:setIsAiming(true)
+	p:DoAttack(0)
+end
+
+-- shove (or stomp, if it's down) with whatever is in hand; never fires a gun
+function B.shove(p, z)
+	p:faceThisObject(z)
+	if p:isAttackStarted() or try(function() return p:isPerformingAttackAnimation() end) then return end
+	try(function() p:setDoShove(true) end)
+	p:DoAttack(0)
+end
+
+-- ends a fight; reflex and task fights log instead of adding a command result
+function B.endFight(p, ok, msg)
+	local f = B.fight
+	B.fight = nil
+	p:setIsAiming(false)
+	local kills = 0
+	for z in pairs(f.targets or {}) do if z:isDead() then kills = kills + 1 end end
+	B.kills = (B.kills or 0) + kills
+	if f.reflex or f.task then
+		B.rlog((f.shove and "brawl" or "fight") .. ": " .. msg .. ", " .. kills .. " killed, " .. (f.swings or 0) .. " swings")
+		if f.reflex then B.resumePending() end
+	else
+		B.res("fight", ok, msg .. ", " .. kills .. " killed")
+	end
+end
+
 function B.fightTick(p)
 	local f = B.fight
-	if nowMin() > f.untilMin then B.fight = nil; p:setIsAiming(false); B.res("fight", true, "fight time limit"); return end
-	local zs = B.zombies(p, f.hunt and 14 or 8)
-	if #zs == 0 then B.fight = nil; B.res("fight", true, "no zombies in range, fight over"); p:setIsAiming(false); return end
+	if nowMin() > f.untilMin then B.endFight(p, true, "fight time limit"); return end
+	-- only zombies in sight: one heard through a wall can't be hit, and swinging at it
+	-- burns endurance and strains muscles
+	f.ignore = f.ignore or {}
+	local zs = {}
+	for _, e in ipairs(B.zombies(p, f.radius or (f.hunt and 14 or 8))) do
+		if e.seen and not f.ignore[e.z] then zs[#zs + 1] = e end
+	end
+	if #zs == 0 then B.endFight(p, true, "no zombies in sight, fight over"); return end
 	local near = 0
 	for _, e in ipairs(zs) do if e.d < 2 then near = near + 1 end end
 	if near >= 3 then B.fight = nil; B.endTurn("surrounded: " .. near .. " zombies within 2 tiles"); return end
 	if p:getStats():get(CharacterStat.ENDURANCE) < 0.25 then B.fight = nil; B.endTurn("exhausted"); return end
 	local t = zs[1]
 	local w = p:getPrimaryHandItem()
-	local range = (w and instanceof(w, "HandWeapon") and w:getMaxRange()) or 0.9
+	local range = (not f.shove and w and instanceof(w, "HandWeapon") and w:getMaxRange()) or 0.9
 	if t.d <= range + 0.3 then
 		if f.pathing then ISTimedActionQueue.clear(p); f.pathing = false end
-		B.attack(p, t.z)
+		f.targets = f.targets or {}
+		f.targets[t.z] = true
+		local busy = p:isAttackStarted() or try(function() return p:isPerformingAttackAnimation() end)
+		if not busy then
+			f.swings = (f.swings or 0) + 1
+			-- 4 swings that don't hurt or drop it: something's in the way, stop
+			f.tries = f.tries or {}
+			local tr = f.tries[t.z]
+			local hp = t.z:getHealth()
+			local down = try(function() return t.z:isOnFloor() end)
+			if not tr or hp < tr.hp or down then
+				f.tries[t.z] = { hp = hp, n = 1 }
+			else
+				tr.n = tr.n + 1
+				if tr.n > 4 then
+					f.ignore[t.z] = true
+					B.rlog("can't hit Z#" .. B.zid(t.z) .. " (4 swings, no damage): giving up on it")
+					return
+				end
+			end
+		end
+		if f.shove then B.shove(p, t.z) else B.attack(p, t.z) end
 	elseif f.hunt and t.seen and t.d < 14 then
 		local now = getTimestampMs()
 		if not f.pathing or now - (f.lastPath or 0) > 1500 then
@@ -772,7 +1245,796 @@ function B.fightTick(p)
 	end
 end
 
+---------------------------------------------------------------- standing orders
+local POLICY_DEFAULTS = { melee = "auto", rearm = "on", shove = "on", flee = 3, eat = 0.35, bandage = "on" }
+function B.policyString(t)
+	local ks = {}
+	for k in pairs(POLICY_DEFAULTS) do ks[#ks + 1] = k end
+	table.sort(ks)
+	local out = {}
+	for _, k in ipairs(ks) do out[#out + 1] = k .. "=" .. tostring(t[k]) end
+	return table.concat(out, " ")
+end
+function B.loadPolicy()
+	local pol = {}
+	for k, v in pairs(POLICY_DEFAULTS) do pol[k] = v end
+	for k, v in (B.readFile("policy.txt") or ""):gmatch("(%w+)=(%S+)") do
+		if POLICY_DEFAULTS[k] ~= nil then pol[k] = tonumber(v) or v end
+	end
+	return pol
+end
+B.policy = B.loadPolicy()
+local function pon(k) local v = B.policy[k]; return v == "on" or v == "auto" end
+
+-- policy [key=value ...]: standing orders; saved to policy.txt so they outlive the character
+B.immediate.policy = function(p, a)
+	for _, kv in ipairs(a) do
+		local k, v = kv:match("^(%w+)=(%S+)$")
+		if not k or POLICY_DEFAULTS[k] == nil then error("unknown setting " .. kv .. "; defaults: " .. B.policyString(POLICY_DEFAULTS)) end
+		B.policy[k] = tonumber(v) or v
+	end
+	if #a > 0 then B.writeFile("policy.txt", B.policyString(B.policy)) end
+	return B.policyString(B.policy)
+end
+
+function B.rlog(msg)
+	B.reflexLog = B.reflexLog or {}
+	if #B.reflexLog < 40 then B.reflexLog[#B.reflexLog + 1] = msg end
+end
+
+local function isMelee(w)
+	return w ~= nil and instanceof(w, "HandWeapon") and not w:isRanged()
+		and not try(function() return w:isBroken() end) and w:getMaxDamage() >= 0.3
+end
+local function isGun(w) return w ~= nil and instanceof(w, "HandWeapon") and w:isRanged() end
+
+-- visit items in a container and the bags inside it
+local function eachItem(c, fn, depth)
+	local items = c:getItems()
+	local list = {}
+	for i = 0, items:size() - 1 do list[#list + 1] = items:get(i) end
+	for _, it in ipairs(list) do
+		fn(it)
+		if instanceof(it, "InventoryContainer") and (depth or 0) < 2 then eachItem(it:getInventory(), fn, (depth or 0) + 1) end
+	end
+end
+
+function B.bestMelee(p)
+	local best
+	eachItem(p:getInventory(), function(it)
+		if isMelee(it) and (not best or it:getMaxDamage() > best:getMaxDamage()) then best = it end
+	end)
+	return best
+end
+
+-- true when a close zombie is something the reflexes will deal with
+function B.canDefend(p)
+	if B.policy.melee ~= "auto" then return false end
+	if isMelee(p:getPrimaryHandItem()) then return true end
+	return pon("rearm") and B.bestMelee(p) ~= nil
+end
+
+---------------------------------------------------------------- resumable queue
+-- B.pending holds this turn's queued lines ({line, verb, args, idx}); B.pendingIdx is the
+-- one running. A reflex that clears the queue sets B.resumeFrom so the rest runs afterwards.
+function B.interrupt(p)
+	-- a fight cutting a travel leg short isn't the path's fault
+	if B.task then B.task.interrupted = true end
+	if not B.task and not B.resumeFrom and B.pending and #B.pending > 0 then
+		B.resumeFrom = B.pendingIdx or 1
+	end
+	ISTimedActionQueue.clear(p)
+end
+
+function B.resumePending()
+	local from = B.resumeFrom
+	B.resumeFrom = nil
+	if not from or not B.pending or from > #B.pending then return end
+	B.deferred = B.deferred or {}
+	for i = from, #B.pending do table.insert(B.deferred, B.pending[i]) end
+	B.rlog("resuming at: " .. B.pending[from][1])
+end
+
+---------------------------------------------------------------- reflexes
+function B.reflexTick(p)
+	if B.policy.melee ~= "auto" then return end
+	local zs = {}
+	for _, e in ipairs(B.zombies(p, 3.5)) do if e.seen then zs[#zs + 1] = e end end
+	if #zs == 0 then return end
+	local close = 0
+	for _, e in ipairs(zs) do if e.d < 2 then close = close + 1 end end
+	local fleeN = tonumber(B.policy.flee)
+	if fleeN and close >= fleeN then B.startFlee(p, zs); return end
+	local t = zs[1]
+	local w = p:getPrimaryHandItem()
+	if not isMelee(w) and pon("rearm") then
+		local best = B.bestMelee(p)
+		if best then
+			if getTimestampMs() < (B.rearmUntil or 0) then return end
+			B.rearmUntil = getTimestampMs() + 3000
+			B.interrupt(p)
+			ISInventoryPaneContextMenu.equipWeapon(best, true, best:isTwoHandWeapon(), 0)
+			B.rlog("equipped " .. best:getDisplayName() .. " (Z#" .. B.zid(t.z) .. " at " .. r2(t.d) .. ")")
+			return
+		end
+	end
+	if isMelee(w) then
+		if t.d <= w:getMaxRange() + 0.3 then
+			B.interrupt(p)
+			B.fight = { untilMin = nowMin() + 3, reflex = true, radius = 3 }
+		end
+	elseif pon("shove") and not isGun(w) and t.d <= 1.2 then
+		B.interrupt(p)
+		B.fight = { untilMin = nowMin() + 3, reflex = true, shove = true, radius = 2 }
+	end
+end
+
+-- run from a group: pick a free square ~10 tiles away from their centre, veering if blocked
+function B.startFlee(p, zs)
+	local px, py, pz = p:getX(), p:getY(), math.floor(p:getZ())
+	local cx, cy, n = 0, 0, 0
+	for _, e in ipairs(zs) do if e.d < 4 then cx = cx + e.z:getX(); cy = cy + e.z:getY(); n = n + 1 end end
+	local dx, dy = px - cx / n, py - cy / n
+	local len = math.sqrt(dx * dx + dy * dy)
+	if len < 0.01 then dx, dy, len = 1, 0, 1 end
+	dx, dy = dx / len, dy / len
+	for _, ang in ipairs({ 0, 0.5, -0.5, 1.0, -1.0, 1.6, -1.6 }) do
+		local c, s = math.cos(ang), math.sin(ang)
+		local vx, vy = dx * c - dy * s, dx * s + dy * c
+		for _, dist in ipairs({ 10, 7, 5 }) do
+			local tx, ty = math.floor(px + vx * dist), math.floor(py + vy * dist)
+			local sq = sqAt(tx, ty, pz)
+			if sq and sq:getFloor() and try(function() return sq:isFree(false) end) then
+				B.interrupt(p)
+				try(function() p:setRunning(true) end)
+				Q(ISPathFindAction:pathToLocationF(p, tx + 0.5, ty + 0.5, pz))
+				B.fleeing = { n = n, untilMs = getTimestampMs() + 20000 }
+				B.rlog("fleeing " .. n .. " zombies toward " .. tx .. "," .. ty)
+				return
+			end
+		end
+	end
+	B.endTurn("surrounded: " .. n .. " zombies close and nowhere to run")
+end
+
+function B.fleeTick(p)
+	local f = B.fleeing
+	if #ISTimedActionQueue.getTimedActionQueue(p).queue == 0 or getTimestampMs() > f.untilMs then
+		B.fleeing = nil
+		ISTimedActionQueue.clear(p)
+		try(function() p:setRunning(false) end)
+		B.endTurn("fled from " .. f.n .. " zombies")
+	end
+end
+
+-- bandage bleeding, then eat, when nothing is near; returns true if it queued something
+function B.upkeep(p)
+	if #B.zombies(p, 8) > 0 then return false end
+	B.upkeepTried = B.upkeepTried or {}
+	if pon("bandage") then
+		local parts = p:getBodyDamage():getBodyParts()
+		for i = 0, parts:size() - 1 do
+			local bp = parts:get(i)
+			if bp:bleeding() and not bp:bandaged() then
+				local band
+				eachItem(p:getInventory(), function(it)
+					if not band and not B.upkeepTried[it] and (try(function() return it:getBandagePower() end) or 0) > 0
+						and not try(function() return it:isWorn() end) then band = it end
+				end)
+				if band then
+					B.upkeepTried[band] = true
+					if band:getContainer() ~= p:getInventory() then Q(ISInventoryTransferAction:new(p, band, band:getContainer(), p:getInventory())) end
+					Q(ISApplyBandage:new(p, p, band, bp, true))
+					B.rlog("bandaging " .. BodyPartType.ToString(bp:getType()) .. " with " .. band:getDisplayName())
+					return true
+				end
+			end
+		end
+	end
+	local eat = tonumber(B.policy.eat)
+	local hunger = p:getStats():get(CharacterStat.HUNGER)
+	if eat and hunger > eat then
+		local want = (hunger - 0.1) * 100
+		local cands = {}
+		eachItem(p:getInventory(), function(it)
+			if instanceof(it, "Food") and not B.upkeepTried[it] then
+				local h = -(it:getHungerChange() * 100)
+				local bad = try(function() return it:isRotten() end) or try(function() return it:isPoison() end)
+					or (try(function() return it:isbDangerousUncooked() end) and not try(function() return it:isCooked() end))
+				if h >= 3 and not bad then cands[#cands + 1] = { it = it, h = h } end
+			end
+		end)
+		table.sort(cands, function(a, b) return a.h < b.h end)
+		local pick = cands[#cands]
+		for _, c in ipairs(cands) do if c.h >= want then pick = c; break end end
+		if pick then
+			B.upkeepTried[pick.it] = true
+			ISInventoryPaneContextMenu.eatItem(pick.it, 1, 0)
+			B.rlog("eating " .. pick.it:getDisplayName() .. " (hunger " .. r2(hunger) .. ")")
+			return true
+		end
+	end
+	return false
+end
+
+---------------------------------------------------------------- goal commands
+-- A goal owns the queue until it finishes: later lines of the turn wait (see
+-- ClaudeBotStep:perform) and B.finishTask queues them again.
+local function startTask(t, line)
+	t.line = line
+	t.resumeFrom = (B.pendingIdx or 0) + 1
+	B.task = t
+end
+
+function B.finishTask(ok, msg)
+	local t = B.task
+	B.task = nil
+	B.setSpeedRaw(B.speed)
+	B.res(t.line, ok, msg)
+	if B.pending and t.resumeFrom <= #B.pending then B.resumeFrom = t.resumeFrom; B.resumePending() end
+end
+
+function B.taskTick(p)
+	if #ISTimedActionQueue.getTimedActionQueue(p).queue > 0 then return end
+	local t = B.task
+	local ok, err = pcall(t.tick, t, p)
+	if not ok and B.task == t then B.finishTask(false, "error: " .. tostring(err)) end
+end
+
+local function freeNear(x, y, z, r)
+	for rr = 0, r do
+		for dx = -rr, rr do for dy = -rr, rr do
+			if math.max(math.abs(dx), math.abs(dy)) == rr then
+				local sq = sqAt(x + dx, y + dy, z)
+				if sq and sq:getFloor() and try(function() return sq:isFree(false) end) then return x + dx, y + dy end
+			end
+		end end
+	end
+	return nil
+end
+
+-- travel: legs of up to 50 tiles; veers sideways after a failed or stuck leg
+local TURNS = { 0, 0.6, -0.6, 1.2, -1.2 }
+local LEGS = { 50, 30, 30, 20, 20 }
+local function travelTick(t, p)
+	local px, py, pz = p:getX(), p:getY(), math.floor(p:getZ())
+	local dx, dy = t.x + 0.5 - px, t.y + 0.5 - py
+	local d = math.sqrt(dx * dx + dy * dy)
+	if t.pathing then
+		-- judge legs by progress toward the goal, not by movement: walking back and forth
+		-- in front of a locked door moves plenty and gets nowhere
+		t.pathing = false
+		if not t.failed and d < t.best - 2 then t.best, t.fails = d, 0
+		elseif not t.interrupted then t.fails = t.fails + 1 end
+		t.failed, t.interrupted = false, false
+		if t.fails >= #TURNS then
+			return B.finishTask(false, "STUCK: no progress toward " .. t.x .. "," .. t.y .. " in " .. t.fails
+				.. " tries; closest " .. r2(t.best) .. " tiles, now at " .. math.floor(px) .. "," .. math.floor(py)
+				.. ". Locked door or fence? Find another way in (window, other door)")
+		end
+	end
+	if d < 1.5 and pz == t.z then return B.finishTask(true, "arrived at " .. t.x .. "," .. t.y .. " in " .. t.legs .. " legs") end
+	local tx, ty, tz
+	if d <= 50 and t.fails == 0 then
+		tx, ty, tz = t.x, t.y, t.z
+	else
+		local ang = TURNS[math.min(t.fails + 1, #TURNS)]
+		local c, s = math.cos(ang), math.sin(ang)
+		local ux, uy = dx / d, dy / d
+		local vx, vy = ux * c - uy * s, ux * s + uy * c
+		-- long legs run at ground level (the pathfinder takes the stairs)
+		-- retries veer (TURNS) and shorten: a long leg often ends in a fenced yard
+		local L = math.min(d, LEGS[math.min(t.fails + 1, #LEGS)])
+		while L >= 4 and not tx do
+			tx, ty = freeNear(math.floor(px + vx * L), math.floor(py + vy * L), 0, 3)
+			L = L * 0.6
+		end
+		tz = 0
+		if not tx then
+			t.fails = t.fails + 1
+			if t.fails >= #TURNS then return B.finishTask(false, "STUCK: no walkable ground toward " .. t.x .. "," .. t.y) end
+			return
+		end
+	end
+	t.legs = t.legs + 1
+	t.lastX, t.lastY = px, py
+	local act = ISPathFindAction:pathToLocationF(p, tx + 0.5, ty + 0.5, tz)
+	act:setOnFail(function() t.failed = true end)
+	Q(act)
+	t.pathing = true
+end
+
+function B.newTravel(x, y, z)
+	return { kind = "travel", x = x, y = y, z = z, fails = 0, legs = 0, best = math.huge, fast = true, tick = travelTick,
+		status = function(t, p) return "travel to " .. t.x .. "," .. t.y .. "," .. t.z .. " (leg " .. t.legs .. ")" end }
+end
+
+B.cmds.travel = function(p, a, line)
+	startTask(B.newTravel(num(a[1], "x"), num(a[2], "y"), tonumber(a[3]) or math.floor(p:getZ())), line)
+	return "traveling"
+end
+
+function B.getBase()
+	local raw = B.readFile("base.txt")
+	local x, y, z = (raw or ""):match("(%-?%d+)%s+(%-?%d+)%s+(%-?%d+)")
+	if not x then return nil end
+	return { x = tonumber(x), y = tonumber(y), z = tonumber(z) }
+end
+
+B.immediate.setbase = function(p, a)
+	local x = tonumber(a[1]) or math.floor(p:getX())
+	local y = tonumber(a[2]) or math.floor(p:getY())
+	local z = tonumber(a[3]) or math.floor(p:getZ())
+	B.writeFile("base.txt", x .. " " .. y .. " " .. z)
+	return "base set to " .. x .. "," .. y .. "," .. z
+end
+
+B.cmds.home = function(p, a, line)
+	local b = B.getBase()
+	if not b then error("no base yet: setbase first") end
+	startTask(B.newTravel(b.x, b.y, b.z), line)
+	return "heading home to " .. b.x .. "," .. b.y .. "," .. b.z
+end
+
+-- the building you're in, or the nearest one within maxD tiles (a BuildingDef)
+function B.buildingAt(p, maxD)
+	local sq = p:getCurrentSquare()
+	local b = sq and sq:getBuilding()
+	if b then return b:getDef() end
+	local px, py = p:getX(), p:getY()
+	local all = getWorld():getMetaGrid():getBuildings()
+	local best, bd
+	for i = 0, all:size() - 1 do
+		local d = all:get(i)
+		local ex = math.max(d:getX() - px, 0, px - (d:getX() + d:getW()))
+		local ey = math.max(d:getY() - py, 0, py - (d:getY() + d:getH()))
+		local dist = math.sqrt(ex * ex + ey * ey)
+		if dist <= maxD and (not best or dist < bd) then best, bd = d, dist end
+	end
+	return best
+end
+
+local function maxLevel(bdef) return try(function() return bdef:getMaxLevel() end) or 0 end
+
+-- exterior doors/windows of a building on floor z that let zombies in (open or smashed)
+function B.breaches(bdef, z)
+	local out = {}
+	for x = bdef:getX() - 1, bdef:getX() + bdef:getW() + 1 do
+		for y = bdef:getY() - 1, bdef:getY() + bdef:getH() + 1 do
+			local sq = sqAt(x, y, z)
+			if sq then
+				for _, o in ipairs(objList(sq)) do
+					local door, win = isDoor(o), isWindow(o)
+					if door or win then
+						local n = o:getNorth()
+						local other = n and sqAt(x, y - 1, z) or sqAt(x - 1, y, z)
+						if other and sq:isOutside() ~= other:isOutside() and not try(function() return o:isBarricaded() end) then
+							local what
+							if door and try(function() return o:IsOpen() end) then what = "open door"
+							elseif win and try(function() return o:isSmashed() end) then what = "smashed window"
+							elseif win and try(function() return o:IsOpen() end) then what = "open window" end
+							if what then out[#out + 1] = { what = what, x = x, y = y, edge = n and "N" or "W", obj = o, sq = sq, other = other } end
+						end
+					end
+				end
+			end
+		end
+	end
+	return out
+end
+
+local function breachText(list)
+	local t = {}
+	for _, b in ipairs(list) do t[#t + 1] = b.what .. " " .. b.x .. "," .. b.y .. b.edge end
+	return #t > 0 and table.concat(t, "; ") or "none"
+end
+
+-- every exterior door and window of a building on floor z, with its state
+-- (nil if the area isn't loaded)
+function B.openings(bdef, z)
+	local out, loaded = { doors = 0, windows = 0, bad = 0, locked = 0 }, false
+	for x = bdef:getX() - 1, bdef:getX() + bdef:getW() + 1 do
+		for y = bdef:getY() - 1, bdef:getY() + bdef:getH() + 1 do
+			local sq = sqAt(x, y, z)
+			if sq then
+				loaded = true
+				for _, o in ipairs(objList(sq)) do
+					local door, win = isDoor(o), isWindow(o)
+					if door or win then
+						local other = o:getNorth() and sqAt(x, y - 1, z) or sqAt(x - 1, y, z)
+						if other and sq:isOutside() ~= other:isOutside() then
+							if door then
+								out.doors = out.doors + 1
+								if try(function() return o:isLocked() end) then out.locked = out.locked + 1 end
+								if try(function() return o:IsOpen() end) then out.bad = out.bad + 1 end
+							else
+								out.windows = out.windows + 1
+								if try(function() return o:isSmashed() or o:IsOpen() end) then out.bad = out.bad + 1 end
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+	return loaded and out or nil
+end
+
+-- homes [radius]: nearby houses ranked by how easy they are to hold: few ground-floor
+-- openings, nothing already broken, an upstairs to retreat to
+B.immediate.homes = function(p, a)
+	local R = tonumber(a[1]) or 120
+	local px, py = p:getX(), p:getY()
+	local all = getWorld():getMetaGrid():getBuildings()
+	local found = {}
+	for i = 0, all:size() - 1 do
+		local b = all:get(i)
+		local dx, dy = b:getX() + b:getW() / 2 - px, b:getY() + b:getH() / 2 - py
+		local d = math.sqrt(dx * dx + dy * dy)
+		if d <= R and b:getW() * b:getH() <= 700 then
+			local rs, names, bedroom, n = b:getRooms(), {}, false, 0
+			for j = 0, rs:size() - 1 do
+				local nm = rs:get(j):getName() or "?"
+				n = n + 1
+				if nm == "bedroom" then bedroom = true end
+				if not names[nm] then names[nm] = true; names[#names + 1] = nm end
+			end
+			if bedroom and n <= 20 then
+				local g = B.openings(b, 0)
+				if g then
+					local floors = maxLevel(b) + 1
+					-- lower is better: each opening is something to watch or board up
+					local score = g.doors * 2 + g.windows + g.bad * 6 - (floors > 1 and 4 or 0)
+					found[#found + 1] = { b = b, d = d, g = g, floors = floors, score = score, names = names }
+				end
+			end
+		end
+	end
+	table.sort(found, function(x, y) return x.score < y.score end)
+	local lines = {}
+	for i = 1, math.min(#found, 10) do
+		local e = found[i]
+		local b = e.b
+		lines[#lines + 1] = string.format("score %d | %dm | box %d,%d %dx%d | floors %d | ground: %d doors (%d locked), %d windows, %d open/broken%s | %s",
+			e.score, math.floor(e.d), b:getX(), b:getY(), b:getW(), b:getH(), e.floors, e.g.doors, e.g.locked, e.g.windows, e.g.bad,
+			try(function() return b:isAllExplored() end) and " | explored" or "", table.concat(e.names, ","))
+	end
+	B.scanResult = lines
+	return #found .. " houses within " .. R .. " (loaded area only), best first"
+end
+
+-- a free square inside the room, nearest its middle (nil if none loaded)
+local function roomSpot(rd)
+	local cx, cy = rd:getX() + rd:getW() / 2, rd:getY() + rd:getH() / 2
+	local best, bd
+	for x = rd:getX(), rd:getX() + rd:getW() - 1 do
+		for y = rd:getY(), rd:getY() + rd:getH() - 1 do
+			local sq = sqAt(x, y, rd:getZ())
+			local room = sq and sq:getRoom()
+			if room and try(function() return room:getRoomDef() == rd end) and try(function() return sq:isFree(false) end) then
+				local d = (x + 0.5 - cx) ^ 2 + (y + 0.5 - cy) ^ 2
+				if not best or d < bd then best, bd = { x = x, y = y, z = rd:getZ() }, d end
+			end
+		end
+	end
+	return best
+end
+
+-- sweep: visit every room on this floor, hunt what's seen there, report breaches
+local function sweepTick(t, p)
+	if t.cur then
+		-- a path can end without reaching the spot (and without calling onFail), so check
+		local off = math.sqrt((p:getX() - t.spot.x - 0.5) ^ 2 + (p:getY() - t.spot.y - 0.5) ^ 2)
+		if t.failed or off > 2 then
+			t.unreachable[#t.unreachable + 1] = t.cur:getName() .. "@" .. t.spot.x .. "," .. t.spot.y
+			B.rlog("sweep: missed " .. t.cur:getName() .. " (" .. (t.failed and "no path" or r2(off) .. " tiles short") .. ")")
+		else
+			local seen = false
+			for _, e in ipairs(B.zombies(p, 12)) do if e.seen then seen = true end end
+			if seen and t.fights < 3 then
+				t.fights = t.fights + 1
+				B.fight = { untilMin = nowMin() + 5, hunt = true, task = true, radius = 12 }
+				return
+			end
+			t.cleared = t.cleared + 1
+		end
+		t.cur, t.failed, t.fights = nil, false, 0
+	end
+	local px, py = p:getX(), p:getY()
+	local bestI, bestSpot, bd
+	for i, rd in ipairs(t.rooms) do
+		local spot = roomSpot(rd)
+		if spot then
+			local d = (spot.x - px) ^ 2 + (spot.y - py) ^ 2
+			if not bestI or d < bd then bestI, bestSpot, bd = i, spot, d end
+		end
+	end
+	if not bestI then
+		for _, rd in ipairs(t.rooms) do t.unreachable[#t.unreachable + 1] = rd:getName() .. "(not loaded)" end
+		return B.finishTask(true, "swept " .. t.cleared .. "/" .. t.total .. " rooms on floor " .. t.z .. ", killed " .. (B.kills - t.kills0)
+			.. (#t.unreachable > 0 and "; unreachable: " .. table.concat(t.unreachable, ",") or "")
+			.. "; breaches: " .. breachText(B.breaches(t.bdef, t.z)))
+	end
+	t.cur, t.spot = table.remove(t.rooms, bestI), bestSpot
+	local act = ISPathFindAction:pathToLocationF(p, bestSpot.x + 0.5, bestSpot.y + 0.5, bestSpot.z)
+	act:setOnFail(function() t.failed = true end)
+	Q(act)
+end
+
+B.cmds.sweep = function(p, a, line)
+	local bdef = B.buildingAt(p, 20)
+	if not bdef then error("no building within 20 tiles") end
+	local z = math.floor(p:getZ())
+	local rooms = {}
+	local rs = bdef:getRooms()
+	for i = 0, rs:size() - 1 do
+		local rd = rs:get(i)
+		if rd:getZ() == z then rooms[#rooms + 1] = rd end
+	end
+	B.kills = B.kills or 0
+	startTask({ kind = "sweep", bdef = bdef, z = z, rooms = rooms, total = #rooms, cleared = 0, fights = 0,
+		unreachable = {}, kills0 = B.kills, tick = sweepTick,
+		status = function(t) return "sweep " .. t.cleared .. "/" .. t.total .. " rooms" end }, line)
+	return "sweeping " .. #rooms .. " rooms on floor " .. z
+end
+
+-- secure: close the building's open exterior doors and windows from the inside
+B.cmds.secure = function(p, a)
+	local bdef = B.buildingAt(p, 20)
+	if not bdef then error("no building within 20 tiles") end
+	local z = math.floor(p:getZ())
+	local closing, left = 0, {}
+	for _, b in ipairs(B.breaches(bdef, z)) do
+		if b.what == "smashed window" then
+			left[#left + 1] = b
+		else
+			local inside = b.sq:isOutside() and b.other or b.sq
+			Q(ISPathFindAction:pathToLocationF(p, inside:getX() + 0.5, inside:getY() + 0.5, z))
+			if b.what == "open door" then Q(ISOpenCloseDoor:new(p, b.obj)) else Q(ISOpenCloseWindow:new(p, b.obj)) end
+			closing = closing + 1
+		end
+	end
+	-- curtains: a zombie that sees you through a window breaks it
+	local curtains = 0
+	for x = bdef:getX() - 1, bdef:getX() + bdef:getW() + 1 do
+		for y = bdef:getY() - 1, bdef:getY() + bdef:getH() + 1 do
+			local sq = sqAt(x, y, z)
+			if sq then
+				for _, o in ipairs(objList(sq)) do
+					if instanceof(o, "IsoCurtain") and try(function() return o:IsOpen() end) then
+						ISWorldObjectContextMenu.onOpenCloseCurtain(nil, o, 0)
+						curtains = curtains + 1
+					end
+				end
+			end
+		end
+	end
+	return "closing " .. closing .. " doors/windows and " .. curtains .. " curtains; still open: " .. breachText(left)
+end
+
+-- survey [filter]: what the building's containers hold, without walking to them
+B.immediate.survey = function(p, a)
+	local bdef = B.buildingAt(p, 20)
+	if not bdef then error("no building within 20 tiles") end
+	local filter = a[1] and a[1]:lower()
+	if filter == "weapon" or filter == "weapons" then
+		-- real melee weapons, strongest first
+		local found = {}
+		for z = 0, maxLevel(bdef) do
+			for x = bdef:getX(), bdef:getX() + bdef:getW() - 1 do
+				for y = bdef:getY(), bdef:getY() + bdef:getH() - 1 do
+					local sq = sqAt(x, y, z)
+					if sq then
+						for _, e in ipairs(B.containersOn(sq)) do
+							eachItem(e.c, function(it)
+								if isMelee(it) and it:getMaxDamage() >= 0.5 then found[#found + 1] = { it = it, x = x, y = y, z = z, kind = e.kind } end
+							end)
+						end
+						for _, wo in ipairs(B.floorItems(sq)) do
+							if isMelee(wo:getItem()) and wo:getItem():getMaxDamage() >= 0.5 then found[#found + 1] = { it = wo:getItem(), x = x, y = y, z = z, kind = "floor" } end
+						end
+					end
+				end
+			end
+		end
+		table.sort(found, function(a, b) return a.it:getMaxDamage() > b.it:getMaxDamage() end)
+		local lines = {}
+		for i = 1, math.min(#found, 15) do
+			local f = found[i]
+			lines[#lines + 1] = string.format("%d,%d,%d %s: %s #%d dmg %.2f cond %d/%d", f.x, f.y, f.z, f.kind, f.it:getDisplayName(), f.it:getID(),
+				f.it:getMaxDamage(), f.it:getCondition(), f.it:getConditionMax())
+		end
+		B.surveyResult = lines
+		return #found .. " melee weapons"
+	end
+	local lines, nC, nEmpty = {}, 0, 0
+	for z = 0, maxLevel(bdef) do
+		for x = bdef:getX(), bdef:getX() + bdef:getW() - 1 do
+			for y = bdef:getY(), bdef:getY() + bdef:getH() - 1 do
+				local sq = sqAt(x, y, z)
+				if sq then
+					for ci, e in ipairs(B.containersOn(sq)) do
+						nC = nC + 1
+						local items = e.c:getItems()
+						if items:size() == 0 then nEmpty = nEmpty + 1 end
+						local names, order = {}, {}
+						for i = 0, items:size() - 1 do
+							local it = items:get(i)
+							local nm = it:getDisplayName()
+							local cat = (try(function() return it:getDisplayCategory() end) or ""):lower()
+							if not filter or nm:lower():find(filter, 1, true) or it:getFullType():lower():find(filter, 1, true) or cat:find(filter, 1, true) then
+								local key = filter and (nm .. " #" .. it:getID()) or nm
+								if not names[key] then names[key] = 0; order[#order + 1] = key end
+								names[key] = names[key] + 1
+							end
+						end
+						if #order > 0 then
+							local parts = {}
+							for _, k in ipairs(order) do parts[#parts + 1] = names[k] > 1 and (k .. " x" .. names[k]) or k end
+							local txt = table.concat(parts, ", ")
+							if #txt > 160 then txt = txt:sub(1, 157) .. "..." end
+							lines[#lines + 1] = string.format("%d,%d,%d %s%s: %s", x, y, z, e.kind, ci > 1 and ("#" .. ci) or "", txt)
+						end
+					end
+				end
+			end
+		end
+	end
+	local total = #lines
+	if not filter and total > 30 then
+		for i = #lines, 31, -1 do lines[i] = nil end
+		lines[#lines + 1] = "... " .. (total - 30) .. " more; narrow it: survey <word> matches item names, types and categories (weapon, food, firstaid, container...)"
+	end
+	B.surveyResult = lines
+	return nC .. " containers (" .. nEmpty .. " empty), " .. total .. " with matches"
+end
+
+-- stash x y [n] [keep id ...] [all]: put carried things in container n at x,y. Keeps worn
+-- and equipped items and the listed ids; "all" empties bags too.
+-- find type[,type...] [radius]: every loaded container or floor spot (default 60 tiles, all
+-- floors) holding items whose type or name contains one of the words; nearest first
+B.immediate.find = function(p, a)
+	if not a[1] then error("find what? e.g. find plank,nails,saw 60") end
+	local words = {}
+	for w in a[1]:lower():gmatch("[^,]+") do words[#words + 1] = w end
+	local R = tonumber(a[2]) or 60
+	local px, py = math.floor(p:getX()), math.floor(p:getY())
+	local function match(it)
+		local t, n = it:getType():lower(), it:getDisplayName():lower()
+		for _, w in ipairs(words) do if t:find(w, 1, true) or n:find(w, 1, true) then return it:getDisplayName() end end
+	end
+	local spots = {}
+	local function add(x, y, z, where, name)
+		local k = x .. "," .. y .. "," .. z .. " " .. where
+		local e = spots[k]
+		if not e then e = { k = k, d = math.sqrt((x - px) ^ 2 + (y - py) ^ 2), n = {} }; spots[k] = e end
+		e.n[name] = (e.n[name] or 0) + 1
+	end
+	for z = 0, 3 do for x = px - R, px + R do for y = py - R, py + R do
+		local sq = sqAt(x, y, z)
+		if sq then
+			for _, e in ipairs(B.containersOn(sq)) do
+				eachItem(e.c, function(it) local m = match(it); if m then add(x, y, z, e.kind, m) end end)
+			end
+			for _, wo in ipairs(B.floorItems(sq)) do
+				local m = match(wo:getItem()); if m then add(x, y, z, "floor", m) end
+			end
+		end
+	end end end
+	local list = {}
+	for _, e in pairs(spots) do list[#list + 1] = e end
+	if #list == 0 then return "none within " .. R end
+	table.sort(list, function(x, y) return x.d < y.d end)
+	local lines = {}
+	for i = 1, math.min(#list, 25) do
+		local e, bits = list[i], {}
+		for n, c in pairs(e.n) do bits[#bits + 1] = n .. (c > 1 and (" x" .. c) or "") end
+		lines[#lines + 1] = math.floor(e.d) .. "m " .. e.k .. ": " .. table.concat(bits, ", ")
+	end
+	return #list .. " spots" .. (#list > 25 and " (nearest 25)" or "") .. "\n      " .. table.concat(lines, "\n      ")
+end
+
+-- fortification of a building: every exterior window/door with planks per side, state, key
+function B.fortInfo(p, bdef)
+	local rows, win, boarded, doors, locked = {}, 0, 0, 0, 0
+	for z = 0, maxLevel(bdef) do
+		for x = bdef:getX() - 1, bdef:getX() + bdef:getW() + 1 do
+			for y = bdef:getY() - 1, bdef:getY() + bdef:getH() + 1 do
+				local sq = sqAt(x, y, z)
+				if sq then
+					for _, o in ipairs(objList(sq)) do
+						local door, w = isDoor(o), isWindow(o)
+						if door or w then
+							local other = o:getNorth() and sqAt(x, y - 1, z) or sqAt(x - 1, y, z)
+							if other and sq:isOutside() ~= other:isOutside() then
+								local b1 = try(function() return o:getBarricadeOnSameSquare() end)
+								local b2 = try(function() return o:getBarricadeOnOppositeSquare() end)
+								local pl = (b1 and b1:getNumPlanks() or 0) + (b2 and b2:getNumPlanks() or 0)
+								local f = {}
+								if try(function() return o:IsOpen() end) then f[#f + 1] = "OPEN" end
+								if w and try(function() return o:isSmashed() end) then f[#f + 1] = "SMASHED" end
+								if door then
+									doors = doors + 1
+									local lk = try(function() return o:isLocked() end)
+									if lk then locked = locked + 1; f[#f + 1] = "locked" else f[#f + 1] = "UNLOCKED" end
+									local kid = try(function() return o:getKeyId() end)
+									if kid and kid ~= -1 then
+										f[#f + 1] = (try(function() return p:getInventory():haveThisKeyId(kid) end) and "key: have" or "key: NOT CARRIED")
+									end
+								else
+									win = win + 1
+									if pl > 0 then boarded = boarded + 1 end
+								end
+								rows[#rows + 1] = string.format("%s %d,%d,%d planks=%d %s", door and "door" or "window", x, y, z, pl, table.concat(f, " "))
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+	return rows, string.format("%d/%d windows boarded, %d/%d doors locked", boarded, win, locked, doors)
+end
+function B.baseBuilding(p)
+	local b = B.getBase()
+	local sq = b and sqAt(b.x, b.y, b.z)
+	local bd = sq and sq:getBuilding()
+	return bd and bd:getDef()
+end
+-- fort: the base's openings (or this building's with "fort here")
+B.immediate.fort = function(p, a)
+	local bdef = (a[1] ~= "here" and B.baseBuilding(p)) or B.buildingAt(p, 20)
+	if not bdef then error("no base set and no building nearby") end
+	local rows, sum = B.fortInfo(p, bdef)
+	return sum .. "\n      " .. table.concat(rows, "\n      ")
+end
+
+B.cmds.stash = function(p, a)
+	local sq = sqAt(num(a[1]), num(a[2]), math.floor(p:getZ()))
+	local cs = B.containersOn(sq)
+	-- a small third number picks the container; item ids are big
+	local n, first = 1, 3
+	if tonumber(a[3]) and tonumber(a[3]) < 10 then n, first = tonumber(a[3]), 4 end
+	local e = cs[n]
+	if not e then error("no container there") end
+	local keep, all = {}, false
+	for i = first, #a do
+		if a[i] == "all" then all = true elseif tonumber(a[i]) then keep[tonumber(a[i])] = true end
+	end
+	local inv = p:getInventory()
+	local list = {}
+	local function consider(it)
+		if keep[it:getID()] or p:isEquipped(it) or try(function() return it:isWorn() end) then return end
+		if try(function() return instanceof(it, "Key") or it:getFullType():find("KeyRing", 1, true) ~= nil end) then return end
+		list[#list + 1] = it
+	end
+	eachItem(inv, function(it)
+		if it:getContainer() == inv then consider(it)
+		elseif all then consider(it) end
+	end)
+	luautils.walkToContainer(e.c, 0)
+	local room = e.c:getCapacity() - e.c:getCapacityWeight()
+	local moved, skipped = 0, 0
+	for _, it in ipairs(list) do
+		local w = it:getUnequippedWeight()
+		if w <= room then
+			room = room - w
+			Q(ISInventoryTransferAction:new(p, it, it:getContainer(), e.c))
+			moved = moved + 1
+		else
+			skipped = skipped + 1
+		end
+	end
+	return "stashing " .. moved .. " items in " .. e.kind .. (skipped > 0 and ("; " .. skipped .. " didn't fit") or "")
+end
+
 ---------------------------------------------------------------- turn loop
+function B.biteCount(p)
+	local n, parts = 0, p:getBodyDamage():getBodyParts()
+	for i = 0, parts:size() - 1 do if parts:get(i):bitten() then n = n + 1 end end
+	return n
+end
+
 function B.visibleSet(p)
 	local s = {}
 	for _, e in ipairs(B.zombies(p, 30)) do if e.seen then s[B.zid(e.z)] = true end end
@@ -783,14 +2045,24 @@ function B.startTurn(id, lines)
 	local p = P()
 	B.turn = id
 	B.results = {}
+	B.reflexLog = {}
+	B.upkeepTried = {}
+	B.autoResumed = {}
 	if not p or p:isDead() then B.dumpState(p and "dead" or "no player"); return end
 	local cont = false
 	if lines[1] and lines[1]:match("^%s*continue") then cont = true; table.remove(lines, 1) end
 	B.deferred = nil
 	if not cont then
 		if #ISTimedActionQueue.getTimedActionQueue(p).queue > 0 or p:getCharacterActions():size() > 0 then ISTimedActionQueue.clear(p) end
-		B.fight = nil
+		B.fight = nil; B.bash = nil; B.task = nil; B.fleeing = nil
+		B.pending, B.pendingIdx, B.resumeFrom = {}, nil, nil
+		B.setSpeedRaw(B.speed)
+	elseif not B.task and B.pendingIdx and #ISTimedActionQueue.getTimedActionQueue(p).queue == 0 then
+		-- a hit or a pause dropped the queue: run the interrupted line again, then the rest
+		B.resumeFrom = B.resumeFrom or B.pendingIdx
+		B.resumePending()
 	end
+	B.pending = B.pending or {}
 	if try(function() return p:isPerformingAttackAnimation() end) then p:setPerformingAttackAnimation(false) end
 	p:setIsAiming(false)
 	local needRun = cont
@@ -798,22 +2070,30 @@ function B.startTurn(id, lines)
 		local args = {}
 		for w in l:gmatch("%S+") do args[#args + 1] = w end
 		local verb = table.remove(args, 1)
-		if B.immediate[verb] then
+		-- an instant command after a queued one waits its turn ("go x y" then "survey"
+		-- should survey where you end up), so it's queued like the others
+		if B.immediate[verb] and not (B.deferred and #B.deferred > 0) then
 			local ok, msg = pcall(B.immediate[verb], p, args, l)
 			B.res(l, ok, msg)
 			if B.runAfterImm then needRun = true; B.runAfterImm = nil end
-		elseif B.cmds[verb] then
+		elseif B.cmds[verb] or B.immediate[verb] then
 			-- queued one tick later: clear() -> StopAllActionQueue cancels anything added this tick
+			local entry = { l, verb, args, #B.pending + 1 }
+			B.pending[#B.pending + 1] = entry
 			B.deferred = B.deferred or {}
-			table.insert(B.deferred, { l, verb, args })
+			table.insert(B.deferred, entry)
 			needRun = true
 		else
 			B.res(l, false, "unknown command")
 		end
 	end
 	B.turnHealth = p:getBodyDamage():getOverallBodyHealth()
+	B.turnBites = B.biteCount(p)
 	B.turnSeen = B.visibleSet(p)
+	-- zombies already in reach were reported last turn; re-pausing on them every turn
+	-- means no timed action (equip, take) ever finishes while one is chewing on you
 	B.turnClose = {}
+	for _, e in ipairs(B.zombies(p, 2.5)) do B.turnClose[B.zid(e.z)] = true end
 	B.turnDeadline = nowMin() + B.maxTurnMin
 	B.turnStartReal = getTimestampMs()
 	if needRun then
@@ -832,6 +2112,18 @@ function B.endTurn(reason)
 	B.dumpState(reason)
 end
 
+local BUSY_STATES = { "OpenWindowState", "CloseWindowState", "SmashWindowState", "ClimbThroughWindowState",
+	"ClimbOverFenceState", "ClimbOverWallState", "ClimbSheetRopeState", "ClimbDownSheetRopeState",
+	"PlayerGetUpState", "PlayerFallDownState", "PlayerKnockedDown", "PlayerOnGroundState" }
+function B.busyState(st)
+	if not st then return false end
+	for _, n in ipairs(BUSY_STATES) do
+		local cls = _G[n]
+		if cls and st == cls.instance() then return true end
+	end
+	return false
+end
+
 function B.monitor(p)
 	if not B.turnActive then return end
 	if p:isDead() then B.endTurn("DEAD"); return end
@@ -848,28 +2140,82 @@ function B.monitor(p)
 			return
 		end
 		B.swingSince = nil
-		for _, d in ipairs(B.deferred) do Q(ClaudeBotStep:new(p, d[1], d[2], d[3])) end
+		for _, d in ipairs(B.deferred) do Q(ClaudeBotStep:new(p, d[1], d[2], d[3], d[4])) end
 		B.deferred = nil
 		return
 	end
-	if B.fight then B.fightTick(p) end
+	-- window/fence climbs run as player states after their action leaves the queue
+	local st = p:getCurrentState()
+	-- window, climb and fall animations run as player states after their action leaves the
+	-- queue; ending the turn then pauses mid-animation and the window never opens
+	local climbing = B.busyState(st) or (try(function() return p:isClimbing() end) or false)
+	if B.fight then B.fightTick(p)
+	elseif B.fleeing then B.fleeTick(p)
+	elseif not B.bash and not climbing and not p:isAsleep() and B.tickN % 3 == 0 then B.reflexTick(p) end
+	if B.bash then B.bashTick(p) end
+	if not B.turnActive then return end
+	if B.task and not B.fight and not B.fleeing and not climbing then B.taskTick(p) end
 	if not B.turnActive or B.tickN % 5 ~= 0 then return end
+	local defend = B.canDefend(p)
+	if B.task and B.task.fast and B.tickN % 10 == 0 then
+		B.setSpeedRaw((#B.zombies(p, 15) > 0 or B.fight) and B.speed or 3)
+	end
+	local coming = 0
 	for _, e in ipairs(B.zombies(p, 20)) do
 		local id = B.zid(e.z)
-		if e.seen and not B.turnSeen[id] and e.d <= 15 then
+		local targeting = try(function() return e.z:getTarget() == p end)
+		if e.seen and targeting and e.d <= 15 then coming = coming + 1 end
+		-- a far zombie that isn't after you isn't news yet; it can still trigger later
+		-- once it gets close or starts coming
+		if e.seen and not B.turnSeen[id] and e.d <= 15 and (e.d <= 8 or targeting) then
 			B.turnSeen[id] = true
-			if not B.fight then B.endTurn("new zombie #" .. id .. " at " .. r2(e.d) .. " tiles"); return end
+			if not B.fight and not defend then B.endTurn("new zombie #" .. id .. " at " .. r2(e.d) .. " tiles"); return end
+			B.rlog("saw Z#" .. id .. " at " .. r2(e.d) .. (targeting and " (coming)" or ""))
 		end
-		if e.d < 2.5 and not B.fight and not B.turnClose[id] then
+		if e.d < 2.5 and not B.fight and not B.turnClose[id] and not defend then
 			B.turnClose[id] = true
 			B.endTurn("zombie #" .. id .. " within " .. r2(e.d) .. " tiles"); return
 		end
 	end
+	-- warn once per group (again only if it grows by 2); forget it once they stop coming
+	local horde = (tonumber(B.policy.flee) or 3) + 1
+	if coming < horde then B.hordeWarned = nil end
+	if coming >= horde and (not B.hordeWarned or coming >= B.hordeWarned + 2) then
+		B.hordeWarned = coming
+		B.endTurn("horde: " .. coming .. " zombies coming for you"); return
+	end
 	local h = p:getBodyDamage():getOverallBodyHealth()
-	if h < B.turnHealth - 2 then B.turnHealth = h; B.endTurn("hurt (health " .. r2(h) .. ")"); return end
-	if nowMin() > B.turnDeadline then B.endTurn("turn time limit"); return end
+	local bites = B.biteCount(p)
+	if bites > (B.turnBites or bites) then B.turnBites = bites; B.turnHealth = h; B.endTurn("BITTEN (health " .. r2(h) .. ")"); return end
+	if h < B.turnHealth - B.hurtPause then B.turnHealth = h; B.endTurn("hurt (health " .. r2(h) .. ")"); return end
+	-- a night's sleep runs past the turn limit; the turn ends when you wake up
+	local asleep = p:isAsleep()
+	if B.wasAsleep and not asleep then B.wasAsleep = nil; B.endTurn("woke up (fatigue " .. r2(p:getStats():get(CharacterStat.FATIGUE)) .. ")"); return end
+	B.wasAsleep = asleep or nil
+	if nowMin() > B.turnDeadline and not asleep then B.endTurn("turn time limit"); return end
+	if climbing then B.climbSeen = true; return end
 	local q = ISTimedActionQueue.getTimedActionQueue(p).queue
-	if #q == 0 and not B.fight and not p:isAsleep() then B.endTurn("done") end
+	if #q == 0 and not B.fight and not B.bash and not B.fleeing and not B.task and not p:isAsleep() then
+		if B.resumeFrom then B.resumePending(); return end
+		if B.upkeep(p) then return end
+		-- the game clears the whole queue when an action fails or gets interrupted; say
+		-- which lines never ran instead of reporting a clean "done"
+		local ran = B.pendingIdx or 0
+		-- state changes (opening a window, getting up) wipe the queue behind them; pick up
+		-- at the next line once, and only report it if it gets dropped again
+		B.autoResumed = B.autoResumed or {}
+		if B.pending and ran < #B.pending and not B.autoResumed[ran + 1] then
+			B.autoResumed[ran + 1] = true
+			B.resumeFrom = ran + 1
+			B.resumePending()
+			return
+		end
+		for i = ran + 1, #(B.pending or {}) do
+			B.res(B.pending[i][1], false, "NOT RUN: the queue was dropped after '" .. (B.pending[ran] and B.pending[ran][1] or "?") .. "' (it failed or was interrupted)")
+		end
+		if B.pending then B.pendingIdx = #B.pending end
+		B.endTurn("done")
+	end
 end
 
 function B.poll()
