@@ -1561,7 +1561,8 @@ end
 -- resumes afterwards, as after any reflex. A weapon you `drop` on purpose is let go.
 function B.recoverWeapon(p)
 	local w = p:getPrimaryHandItem()
-	if isMelee(w) then B.heldWeapon = w; return end
+	-- held again: a deliberate `drop` of it earlier no longer counts
+	if isMelee(w) then B.heldWeapon = w; if B.letGo then B.letGo[w:getID()] = nil end; return end
 	local h = B.heldWeapon
 	if not h then return end
 	local wo = h:getWorldItem()
