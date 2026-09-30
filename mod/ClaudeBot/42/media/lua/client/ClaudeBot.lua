@@ -5,7 +5,7 @@
 --   eval.lua   : optional snippet run by the "eval" command (debugging)
 ClaudeBot = ClaudeBot or {}
 local B = ClaudeBot
-B.VERSION = "0.10.1"  -- keep in step with mod.info and pz.py
+B.VERSION = "0.11.0"  -- keep in step with mod.info and pz.py
 B.results = B.results or {}
 B.turn = B.turn or 0
 B.speed = B.speed or 1
@@ -1298,6 +1298,35 @@ function B.objectInfo(name)
 		local info = infos:get(i)
 		if info:getName() == name or (info:getScript() and info:getScript():getName() == name) then return info end
 	end
+end
+-- dismantle x y [n|w]: take apart something built (a log wall, a crate...) with a saw and a
+-- screwdriver in your inventory; some of its materials drop on its square
+B.cmds.dismantle = function(p, a)
+	local x, y = num(a[1]), num(a[2])
+	local sq = sqAt(x, y, math.floor(p:getZ()))
+	if not sq then error("square not loaded") end
+	local inv = p:getInventory()
+	local function has(tag) return inv:containsTagEval(tag, function(it) return not it:isBroken() end) end
+	local missing = {}
+	if not has(ItemTag.SAW) then missing[#missing + 1] = "a saw" end
+	if not has(ItemTag.SCREWDRIVER) then missing[#missing + 1] = "a screwdriver" end
+	if #missing > 0 then error("dismantle needs " .. table.concat(missing, " and ") .. " in your inventory") end
+	local want = a[3]
+	local obj = findOn(sq, function(o)
+		if not instanceof(o, "IsoThumpable") or not o:isDismantable() then return false end
+		if want == "n" then return o:getNorth() end
+		if want == "w" then return not o:getNorth() end
+		return true
+	end)
+	if not obj then error("nothing dismantlable at " .. x .. "," .. y .. (want and (" (" .. want .. " edge)") or "")) end
+	local what = obj:getObjectName() .. " " .. (obj:getSprite() and obj:getSprite():getName() or "?")
+	if not luautils.walkAdjWindowOrDoor(p, sq, obj, true) then error("can't get next to " .. x .. "," .. y) end
+	Q(ISDismantleAction:new(p, obj))
+	Q(ClaudeBotCall:new(p, "dismantle", function(p)
+		if obj:getObjectIndex() == -1 then return "dismantled " .. what .. " at " .. x .. "," .. y end
+		error("still standing at " .. x .. "," .. y .. " (interrupted?)")
+	end))
+	return "dismantling " .. what
 end
 B.cmds.build = function(p, a)
 	local name = a[1] or error("build what? e.g. build LogFence x y w")

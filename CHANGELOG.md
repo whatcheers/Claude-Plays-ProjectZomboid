@@ -4,6 +4,15 @@ Versions follow [semver](https://semver.org/). The version lives in three places
 `modversion` in both `mod.info` files, `B.VERSION` in `ClaudeBot.lua`, and `VERSION` in `pz.py`
 (the driver warns when the game is running a different one). Each release is tagged `vX.Y.Z`.
 
+## 0.11.0 — 2026-09-30
+
+### Added
+- **`dismantle x y [n|w]`** takes apart a built object (log wall, fence, crate) on that tile with a
+  saw and a screwdriver from inventory, and verifies it's gone. It drops some of its materials.
+  Used live to take down 4 LogWalls (8159–8162,11663) to make room for a gate.
+- PLAYING.md: gates. `LogGate` (5 logs + 5 bindings, no skill) is 2 tiles wide and fills x and x+1
+  (checked on the map). Two side by side give the van a 4-tile opening; `door x y` opens and closes them.
+
 ## 0.10.1 — 2026-09-30
 
 ### Fixed
