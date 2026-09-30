@@ -6,6 +6,7 @@
   python pz.py full                  the whole last state (map, nearby, inventory)
   python pz.py map | near | inv      just one section of the last state (inv all: every id)
   python pz.py brief                 a few-line status for checking in between player runs
+  python pz.py watch [port]          live turn feed in a browser, open to the home network (default 5160)
   python pz.py raw                   dump state.json
   python pz.py reload                hot-reload ClaudeBot.lua in the running game
   python pz.py eval "R = p:getX()"   run Lua in the game (p = player, R = result)
@@ -14,7 +15,7 @@ Set ZOMBOID_DIR if your Zomboid user folder isn't ~/Zomboid.
 """
 import json, os, sys, time
 
-VERSION = "0.3.0"  # keep in step with mod.info and B.VERSION in ClaudeBot.lua
+VERSION = "0.4.0"  # keep in step with mod.info and B.VERSION in ClaudeBot.lua
 
 D = os.path.join(os.environ.get("ZOMBOID_DIR") or os.path.expanduser("~/Zomboid"), "Lua", "claudebot")
 STATE, CMD = os.path.join(D, "state.json"), os.path.join(D, "cmd.txt")
@@ -273,6 +274,20 @@ def show(s, mode="summary", prev=None):
 
 
 PREV = os.path.join(D, "prev_inventory.json")
+TURNS = os.path.join(D, "turns.jsonl")
+
+
+def log_turn(cmds, s, path=TURNS):
+    """Append one finished turn to the log `pz.py watch` serves, whoever is driving."""
+    rec = {"t": round(time.time(), 1), "cmds": cmds}
+    if s:
+        rec.update({k: s.get(k) for k in ("turn", "reason", "dead", "task", "reflexes")})
+        rec["results"] = [{"cmd": r.get("cmd"), "ok": bool(r.get("ok")), "msg": r.get("msg")} for r in s.get("results") or []]
+        rec["brief"] = sec_brief(s)
+    else:
+        rec["reason"] = "timeout (no answer from the game)"
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec) + "\n")
 
 
 def load_prev():
@@ -403,11 +418,57 @@ def do(cmds, timeout=600, full=False):
                 if s.get("inventory") is not None:
                     with open(PREV, "w", encoding="utf-8") as f:
                         json.dump(s["inventory"], f)
+                log_turn(cmds, s)
                 return
     finally:
         pump.release()
     print(f"timeout after {timeout}s waiting for turn {tid}. Is the game running, with ClaudeBot enabled and a character in the world?")
+    log_turn(cmds, None)
     show(read_state())
+
+
+def watch(port=5160):
+    """Serve watch.html and the turn log to the home network (read-only)."""
+    from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+    from urllib.parse import urlparse, parse_qs
+    page = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watch.html")
+
+    class H(BaseHTTPRequestHandler):
+        def send(self, body, ctype):
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            u = urlparse(self.path)
+            if u.path == "/":
+                with open(page, "rb") as f:
+                    return self.send(f.read(), "text/html; charset=utf-8")
+            if u.path == "/turns":
+                # ?after=N: turns past line N; the first load gets the last 200
+                after = int((parse_qs(u.query).get("after") or ["-1"])[0])
+                try:
+                    with open(TURNS, encoding="utf-8") as f:
+                        lines = f.read().splitlines()
+                except OSError:
+                    lines = []
+                start = max(0, len(lines) - 200) if after < 0 else after
+                s = read_state()
+                body = {"total": len(lines), "turns": [json.loads(l) for l in lines[start:]],
+                        "brief": sec_brief(s) if s and not s.get("running") else None,
+                        "running": bool(s and s.get("running"))}
+                return self.send(json.dumps(body).encode(), "application/json")
+            self.send_error(404)
+
+        def log_message(self, *a):
+            pass
+
+    import socket
+    ip = socket.gethostbyname(socket.gethostname())
+    print(f"watching on http://localhost:{port} and http://{ip}:{port} (Ctrl+C to stop)")
+    ThreadingHTTPServer(("0.0.0.0", port), H).serve_forever()
 
 
 if __name__ == "__main__":
@@ -439,6 +500,8 @@ if __name__ == "__main__":
         with open(os.path.join(D, "eval.lua"), "w", encoding="utf-8") as f:
             f.write("local p = getSpecificPlayer(0)\nlocal B = ClaudeBot\nlocal R\n" + " ".join(a[1:]) + "\nClaudeBot.evalResult = R\n")
         do(["eval"])
+    elif a[0] == "watch":
+        watch(int(a[1]) if a[1:] else 5160)
     elif a[0] == "do":
         do([c for c in a[1:] if c != "--full"], full="--full" in a)
     else:

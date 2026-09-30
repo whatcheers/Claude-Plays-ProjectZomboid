@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ClaudeBot Feed</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Share+Tech+Mono&family=Orbitron:wght@500;700;800&display=swap" rel="stylesheet">
+<style>
+/* tokens from ggprompts.com/styles/air-traffic-control.html */
+:root {
+  --phosphor: #00ff66; --phosphor-dim: #00cc52; --phosphor-bright: #66ffaa;
+  --phosphor-glow: rgba(0, 255, 102, 0.6); --phosphor-subtle: rgba(0, 255, 102, 0.15);
+  --amber: #ffaa00; --amber-subtle: rgba(255, 170, 0, 0.15);
+  --alert-red: #ff3344; --alert-red-glow: rgba(255, 51, 68, 0.6);
+  --alert-blue: #00aaff;
+  --bg-void: #000000; --bg-deep: #0a0f0a; --bg-primary: #0d140d; --bg-secondary: #111a11; --bg-elevated: #152015;
+  --border-dim: rgba(0, 255, 102, 0.2); --border-active: rgba(0, 255, 102, 0.5); --grid-line: rgba(0, 255, 102, 0.08);
+  --text-muted: rgba(0, 255, 102, 0.5); --text-faint: rgba(0, 255, 102, 0.3);
+  --font-mono: 'IBM Plex Mono', 'Share Tech Mono', monospace;
+  --font-display: 'Orbitron', sans-serif;
+  --font-data: 'Share Tech Mono', monospace;
+}
+* { box-sizing: border-box; }
+html { background: var(--bg-void); }
+body {
+  margin: 0; color: var(--phosphor); font: 14px/1.45 var(--font-mono);
+  background:
+    linear-gradient(var(--grid-line) 1px, transparent 1px) 0 0 / 32px 32px,
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px) 0 0 / 32px 32px,
+    radial-gradient(ellipse at top, var(--bg-primary), var(--bg-void) 70%);
+  min-height: 100vh;
+}
+body::after { /* scanlines */
+  content: ""; position: fixed; inset: 0; pointer-events: none;
+  background: repeating-linear-gradient(0deg, rgba(0,0,0,.18) 0 1px, transparent 1px 3px);
+}
+.wrap { max-width: 980px; margin: 0 auto; padding: 0 16px 48px; }
+header .wrap { padding-bottom: 0; }
+header {
+  position: sticky; top: 0; z-index: 2; background: rgba(0,0,0,.92);
+  border-bottom: 1px solid var(--border-active); padding: 10px 0 12px; backdrop-filter: blur(3px);
+}
+.bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+h1 {
+  font: 800 18px/1 var(--font-display); letter-spacing: .18em; margin: 0;
+  text-shadow: 0 0 10px var(--phosphor-glow);
+}
+.live { display: inline-flex; align-items: center; gap: 6px; font: 12px var(--font-data); color: var(--text-muted); }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--text-faint); }
+.dot.run { background: var(--amber); box-shadow: 0 0 8px var(--amber); animation: blink 1s steps(2) infinite; }
+.dot.idle { background: var(--phosphor); box-shadow: 0 0 8px var(--phosphor-glow); }
+.dot.off { background: var(--alert-red); box-shadow: 0 0 8px var(--alert-red-glow); }
+@keyframes blink { 50% { opacity: .25; } }
+.spacer { flex: 1; }
+.count { font: 12px var(--font-data); color: var(--text-muted); }
+.status {
+  margin-top: 10px; padding: 8px 10px; border: 1px solid var(--border-dim); background: var(--bg-deep);
+  font: 13px/1.5 var(--font-data); color: var(--phosphor-bright); white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.status .hl { color: var(--alert-red); text-shadow: 0 0 6px var(--alert-red-glow); }
+.label { font: 700 10px var(--font-display); letter-spacing: .2em; color: var(--text-muted); margin: 18px 0 8px; }
+.strip {
+  display: grid; grid-template-columns: 92px 1fr; border: 1px solid var(--border-dim);
+  border-left: 4px solid var(--phosphor-dim); background: var(--bg-secondary); margin-bottom: 8px;
+}
+.strip.warn { border-left-color: var(--amber); }
+.strip.bad { border-left-color: var(--alert-red); box-shadow: 0 0 14px rgba(255,51,68,.25); }
+.side {
+  padding: 8px; border-right: 1px dashed var(--border-dim); font: 12px/1.4 var(--font-data); color: var(--text-muted);
+}
+.side .clock { color: var(--phosphor); font-size: 15px; }
+.main { padding: 8px 10px; min-width: 0; }
+.reason {
+  display: inline-block; font: 700 10px/1 var(--font-display); letter-spacing: .12em; text-transform: uppercase;
+  padding: 4px 7px; border: 1px solid var(--border-active); color: var(--phosphor); margin-bottom: 6px;
+}
+.warn .reason { border-color: var(--amber); color: var(--amber); }
+.bad .reason { border-color: var(--alert-red); color: var(--alert-red); background: rgba(255,51,68,.08); }
+.cmds { font: 13px var(--font-data); color: var(--alert-blue); overflow-wrap: anywhere; }
+.cmds span + span::before { content: " › "; color: var(--text-faint); }
+ul { list-style: none; margin: 6px 0 0; padding: 0; }
+li { overflow-wrap: anywhere; padding: 1px 0; white-space: pre-wrap; }
+li .tag { display: inline-block; width: 3.2em; color: var(--phosphor-dim); }
+li.err { color: var(--alert-red); } li.err .tag { color: var(--alert-red); }
+li.skip { color: var(--amber); } li.skip .tag { color: var(--amber); }
+li .c { color: var(--text-muted); }
+.extra { margin-top: 5px; font-size: 12px; color: var(--text-muted); overflow-wrap: anywhere; }
+.empty { color: var(--text-muted); padding: 24px 0; }
+@media (max-width: 560px) {
+  header { position: static; }
+  .strip { grid-template-columns: 1fr; }
+  .side { border-right: 0; border-bottom: 1px dashed var(--border-dim); display: flex; gap: 12px; align-items: baseline; }
+}
+</style>
+</head>
+<body>
+<header><div class="wrap">
+  <div class="bar">
+    <h1>CLAUDEBOT</h1>
+    <span class="live"><span class="dot" id="dot"></span><span id="liveText">connecting</span></span>
+    <span class="spacer"></span>
+    <span class="count" id="count"></span>
+  </div>
+  <div class="status" id="status">waiting for the first state…</div>
+</div></header>
+<main class="wrap">
+  <div class="label">TURN FEED · NEWEST FIRST</div>
+  <div id="feed"><div class="empty">No turns logged yet. Every <code>pz.py do</code> shows up here.</div></div>
+</main>
+<script>
+let total = -1, turns = [];
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const short = c => (c || "").length > 32 ? c.slice(0, 30) + "…" : c;
+const hhmmss = t => new Date(t * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
+
+function level(t) {
+  const r = (t.reason || "").toLowerCase();
+  if (t.dead || r.includes("bitten") || r.includes("dead") || r.startsWith("timeout")) return "bad";
+  if ((t.results || []).some(x => !x.ok) || r.includes("zombie") || r.includes("hurt") || r.includes("horde") || r.includes("surrounded")) return "warn";
+  return "";
+}
+
+function strip(t, prev) {
+  const gap = prev ? Math.round(t.t - prev.t) : null;
+  const res = (t.results || []).map(x => {
+    const skip = !x.ok && /^NOT RUN/.test(x.msg || "");
+    const cls = x.ok ? "" : skip ? "skip" : "err";
+    return `<li class="${cls}"><span class="tag">${x.ok ? "ok" : skip ? "skip" : "ERR"}</span><span class="c">${esc(short(x.cmd))}:</span> ${esc(x.msg)}</li>`;
+  }).join("");
+  const extra = [t.task && "task: " + t.task, t.reflexes && t.reflexes.length && "reflexes: " + t.reflexes.join("; ")].filter(Boolean);
+  return `<div class="strip ${level(t)}">
+    <div class="side"><div class="clock">${hhmmss(t.t)}</div>${gap !== null ? `<div>+${gap}s</div>` : ""}</div>
+    <div class="main">
+      <div class="reason">${esc(t.reason || "?")}</div>
+      <div class="cmds">${(t.cmds || []).map(c => `<span>${esc(c)}</span>`).join("")}</div>
+      ${res ? `<ul>${res}</ul>` : ""}
+      ${extra.length ? `<div class="extra">${extra.map(esc).join("<br>")}</div>` : ""}
+    </div></div>`;
+}
+
+function render() {
+  if (!turns.length) return;
+  const out = [];
+  for (let i = turns.length - 1; i >= 0; i--) out.push(strip(turns[i], turns[i - 1]));
+  $("feed").innerHTML = out.join("");
+  $("count").textContent = `${turns.length} turns shown`;
+}
+
+async function tick() {
+  try {
+    const r = await fetch(`/turns?after=${total}`, {cache: "no-store"});
+    const d = await r.json();
+    if (d.turns.length) { turns = turns.concat(d.turns).slice(-300); render(); }
+    total = d.total;
+    $("dot").className = "dot " + (d.running ? "run" : "idle");
+    $("liveText").textContent = d.running ? "turn running" : "paused · waiting for a command";
+    const brief = d.brief || (turns.length && turns[turns.length - 1].brief);
+    if (brief) $("status").innerHTML = brief.map(esc).join("\n").replace(/(BITTEN|DEAD|OVERLOADED)/g, '<span class="hl">$1</span>');
+  } catch (e) {
+    $("dot").className = "dot off";
+    $("liveText").textContent = "server not answering";
+  }
+}
+tick();
+setInterval(tick, 2000);
+</script>
+</body>
+</html>

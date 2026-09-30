@@ -4,6 +4,16 @@ Versions follow [semver](https://semver.org/). The version lives in three places
 `modversion` in both `mod.info` files, `B.VERSION` in `ClaudeBot.lua`, and `VERSION` in `pz.py`
 (the driver warns when the game is running a different one). Each release is tagged `vX.Y.Z`.
 
+## 0.4.0 — 2026-09-30
+
+### Added
+- **`pz.py watch`**: a live turn feed in the browser, served to the home network on port 5160.
+  - A status strip at the top.
+  - Every turn, newest first: commands, `ok`/`ERR` results, `skip` for NOT RUN lines, pause reason, and time since the last turn.
+  - It is read-only and uses only the standard library (`watch.html`).
+- Every `pz.py do` appends to `claudebot/turns.jsonl`, whoever is driving: commands, results, reason, task, reflexes, and the `brief` snapshot.
+  Test: `tests/test_turnlog.py`.
+
 ## 0.3.0 — 2026-09-30
 
 ### Added

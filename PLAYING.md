@@ -32,6 +32,10 @@ that whole history. In one session, 86 game turns rode on 559 model calls and a 
   for sessions started elsewhere). It gets a goal list and plays until something breaks: bitten,
   dead, a mod bug seen twice, stuck, or 150 turns. Then it returns a report of about 15 lines,
   with the bug's exact command and output. It never edits code, and each run starts fresh.
+- **Watching:** `python pz.py watch` serves a live page on port 5160 of the home network
+  (http://\<this PC\>:5160, phone too). It shows a status strip and every turn: commands, results,
+  errors, and NOT RUN lines. Every `pz.py do` is logged to `claudebot/turns.jsonl`, whoever is
+  driving. The page is read-only; chat happens in the Claude session.
 
 ## Why a turn ended (`pause reason`)
 
