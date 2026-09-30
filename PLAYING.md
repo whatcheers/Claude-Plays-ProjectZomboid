@@ -51,8 +51,12 @@ that whole history. In one session, 86 game turns rode on 559 model calls and a 
 | `DEAD` | that's it |
 | `idle` | the turn only had instant commands (`look`, `scan`, ...) |
 
-After an early pause, send `continue` as the first line to resume the leftover queue. Any other
-first command clears it.
+Lines run one at a time: each starts only after the one before it has finished and been checked.
+If a line fails, the rest of the turn is listed as `NOT RUN`. If something cuts a line short without
+an error (the game dropped its actions), it runs again once, then fails with `interrupted before it
+finished`. A reflex (fight, rearm, picking up a dropped weapon) re-runs the line it interrupted.
+After an early pause, send `continue` as the first line to pick up at the interrupted line; any other
+first command starts a fresh turn.
 
 ## Commands
 

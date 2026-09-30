@@ -4,6 +4,27 @@ Versions follow [semver](https://semver.org/). The version lives in three places
 `modversion` in both `mod.info` files, `B.VERSION` in `ClaudeBot.lua`, and `VERSION` in `pz.py`
 (the driver warns when the game is running a different one). Each release is tagged `vX.Y.Z`.
 
+## 0.6.0 — 2026-09-30
+
+### Changed
+- **Turn runner: ClaudeBot runs a turn's lines itself, one at a time.** The game's action queue only
+  ever holds the current line's actions. Each line is judged once they've drained and the character
+  has settled (window/climb/fall states and swings included):
+  - by its check (window open/close/climb);
+  - by a recorded failure (PATH FAILED, couldn't walk there);
+  - or by an end marker queued after its actions.
+  A failed line stops the turn (`NOT RUN: '<line>' failed`). A line cut short with no error runs
+  again once, then fails with `interrupted before it finished`. Reflexes re-run the line they
+  interrupted.
+- Removed the old engine and its flags: `ClaudeBotStep`, the deferred queue, `pending`/`pendingIdx`/
+  `resumeFrom`/`failedIdx`, the one-time auto-resume, and the window watch list. Spec:
+  `docs/superpowers/specs/2026-09-30-turn-runner-design.md`.
+- Tests rewritten against the runner; new: `tests/run_retry.lua`, `tests/run_continue.lua`.
+
+### Fixed
+- A weapon once dropped on purpose with `drop` was never recovered from a later fall, even after
+  being picked up and held again. `tests/weapon_letgo.lua`.
+
 ## 0.5.0 — 2026-09-30
 
 ### Fixed
