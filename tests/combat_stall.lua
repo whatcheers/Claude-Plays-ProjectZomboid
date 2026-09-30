@@ -1,6 +1,5 @@
 -- A downed enemy taking no damage must stop the turn, not restart combat forever.
-local keys = {'zombies', 'attack', 'endTurn', 'fight', 'pending', 'resumeFrom',
-    'deferred', 'kills', 'reflexLog', 'turnActive', 'task'}
+local keys = {'zombies', 'attack', 'endTurn', 'fight', 'run', 'kills', 'reflexLog', 'turnActive', 'task'}
 local saved = {}
 for _, k in ipairs(keys) do saved[k] = B[k] end
 local ended, swings = nil, 0
@@ -10,7 +9,7 @@ local ok, err = pcall(function()
     B.zombies = function() return {{z = enemy, d = 0.5, seen = true}} end
     B.attack = function() swings = swings + 1 end
     B.endTurn = function(reason) ended = reason; B.turnActive = false end
-    B.pending, B.resumeFrom, B.deferred, B.task = {}, nil, nil, nil
+    B.run, B.task = nil, nil
     B.reflexLog, B.turnActive = {}, true
     B.fight = {untilMin = getGameTime():getWorldAgeHours() * 60 + 3, reflex = true}
     for i = 1, 6 do if B.fight then B.fightTick(p) end end

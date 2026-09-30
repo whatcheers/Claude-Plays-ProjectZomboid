@@ -379,9 +379,9 @@ function B.state(reason)
 	end
 	local ph = p:getPrimaryHandItem()
 	s.primary = ph and (ph:getDisplayName() .. " #" .. ph:getID()) or nil
-	local q = ISTimedActionQueue.getTimedActionQueue(p).queue
 	s.queue = {}
-	for i = 1, #q do s.queue[#s.queue + 1] = q[i].line or q[i].Type or "?" end
+	local r = B.run
+	for i = r and r.cur or 1, r and #r.lines or 0 do s.queue[#s.queue + 1] = r.lines[i].text end
 
 	-- zombies
 	s.zombies = {}
@@ -464,41 +464,6 @@ function B.dumpState(reason)
 end
 
 ---------------------------------------------------------------- timed actions
-ClaudeBotStep = ISBaseTimedAction:derive("ClaudeBotStep")
-function ClaudeBotStep:isValid() return true end
--- A window opens or closes (and a climb happens) in a player state that runs after its action
--- has left the queue, and wipes what's queued behind it when it ends. So a line holds (maxTime -1)
--- until that's over and only then runs: otherwise it sees the window as it was, and its own
--- actions get wiped. (The game doesn't consult waitToStart here.) A line wiped while holding
--- never ran, so the one-time auto-resume in B.monitor queues it again.
-function ClaudeBotStep:update()
-	if B.busyState(self.character:getCurrentState()) then return end
-	for _, w in ipairs(B.watches or {}) do
-		if w.doneMs and getTimestampMs() - w.doneMs < 600 then return end
-	end
-	self:forceComplete()
-end
-function ClaudeBotStep:start() end
-function ClaudeBotStep:stop() ISBaseTimedAction.stop(self) end
-function ClaudeBotStep:perform()
-	if self.idx then
-		-- lines after a running goal command wait for it (B.finishTask re-queues them)
-		if B.task and self.idx >= B.task.resumeFrom then ISBaseTimedAction.perform(self); return end
-		B.pendingIdx = self.idx
-	end
-	self:beginAddingActions()
-	local ok, msg = pcall(B.cmds[self.verb] or B.immediate[self.verb], self.character, self.args, self.line)
-	self:endAddingActions()
-	B.res(self.line, ok, msg)
-	ISBaseTimedAction.perform(self)
-end
-function ClaudeBotStep:new(p, line, verb, args, idx)
-	local o = ISBaseTimedAction.new(self, p)
-	o.line, o.verb, o.args, o.idx = line, verb, args, idx
-	o.maxTime = -1
-	o.stopOnWalk, o.stopOnRun, o.stopOnAim = false, false, false
-	return o
-end
 
 ClaudeBotWait = ISBaseTimedAction:derive("ClaudeBotWait")
 function ClaudeBotWait:isValid() return true end
@@ -524,12 +489,12 @@ function B.res(line, ok, msg)
 	B.results[#B.results + 1] = { cmd = line, ok = ok and (msg ~= false), msg = msg ~= nil and tostring(msg) or nil }
 end
 
--- An action of the running line failed (no route...). Report it on that line and mark it, so the
--- one-time auto-resume in B.monitor doesn't run the lines after it from the wrong place.
+-- An action of the running line failed (no route...). Report it on that line and mark it failed
+-- for the runner.
 function B.lineFailed(msg)
-	local e = B.pending and B.pendingIdx and B.pending[B.pendingIdx]
-	B.failedIdx = B.pendingIdx
-	B.res(e and e[1] or "?", false, msg)
+	local l = B.curLine()
+	if l and l.status == "running" then l.failMsg = l.failMsg or msg end
+	B.res(l and l.text or "?", false, msg)
 end
 
 -- A failed walk (walkAdj, walkToContainer: take, loot, put...) only force-stops, which wipes
@@ -674,7 +639,7 @@ B.cmds.bash = function(p, a)
 	local o = findOn(sq, function(o) return isDoor(o) or isWindow(o) end)
 	if not o then error("no door or window at " .. a[1] .. "," .. a[2]) end
 	if not luautils.walkAdjWindowOrDoor(p, sq, o, true) then error("can't reach it") end
-	Q(ClaudeBotStep:new(p, "bash", "_bashgo", { a[1], a[2], a[3] }))
+	Q(ClaudeBotCall:new(p, "bash", function(p) return B.cmds._bashgo(p, { a[1], a[2], a[3] }) end))
 	return "going to bash " .. (try(function() return o:getObjectName() end) or "it")
 end
 B.cmds._bashgo = function(p, a)
@@ -752,25 +717,23 @@ B.cmds.window = function(p, a)
 		return "window already " .. (verb == "open" and "open" or "closed")
 	end
 	if not luautils.walkAdjWindowOrDoor(p, sq, w, true) then error("can't reach window") end
-	local line = "window " .. a[1] .. " " .. a[2] .. " " .. verb
 	if verb == "open" or verb == "close" then
-		local act = ISOpenCloseWindow:new(p, w)
-		B.watchAction(act, line, function(p)
+		Q(ISOpenCloseWindow:new(p, w))
+		B.setCheck(function(p)
 			if w:IsOpen() == (verb == "open") then return "window is " .. (verb == "open" and "open" or "closed") end
 			error("still " .. (w:IsOpen() and "open" or "closed") .. " (" .. windowWhy(w) .. ")")
 		end)
-		Q(act)
 	elseif verb == "smash" then Q(ISSmashWindow:new(p, w))
 	elseif verb == "clearglass" then Q(ISRemoveBrokenGlass:new(p, w))
 	elseif verb == "climb" then
-		local act = ISClimbThroughWindow:new(p, w, 0)
-		local watch
-		watch = B.watchAction(act, line, function(p, performed)
-			if performed and windowSide(p, w) ~= watch.side then return "climbed through" end
-			error("still on the same side (" .. (performed and "" or "the climb never started; ") .. windowWhy(w) .. ")")
-		end)
-		watch.before = function(p) watch.side = windowSide(p, w) end
+		local act, side, started = ISClimbThroughWindow:new(p, w, 0), nil, false
+		local perform = act.perform
+		act.perform = function(self) side, started = windowSide(self.character, w), true; perform(self) end
 		Q(act)
+		B.setCheck(function(p)
+			if started and windowSide(p, w) ~= side then return "climbed through" end
+			error("still on the same side (" .. (started and "" or "the climb never started; ") .. windowWhy(w) .. ")")
+		end)
 	else error("window verb: open|close|smash|clearglass|climb") end
 	return verb .. " window"
 end
@@ -964,39 +927,123 @@ function ClaudeBotCall:new(p, line, fn)
 	return o
 end
 
--- Window actions end in player states that wipe the queue behind them, so a queued check line
--- would be wiped with it. Instead, watch the action and judge the outcome in B.monitor once the
--- character has settled. judge(p, performed) returns a message, or errors with the reason.
-function B.watchAction(act, line, judge)
-	local perform = act.perform
-	local w = { act = act, line = line, idx = B.pendingIdx, judge = judge }
-	act.perform = function(self)
-		if w.before then w.before(self.character) end
-		perform(self)
-		w.doneMs = getTimestampMs()
+---------------------------------------------------------------- turn runner
+-- ClaudeBot owns the turn's queue: B.run.lines run one at a time, and the game's timed-action
+-- queue only ever holds the current line's actions. The game wipes that queue freely (window and
+-- climb states when they end, fights, failed walks), so a line is judged only once the queue has
+-- drained and the character has settled. docs/superpowers/specs/2026-09-30-turn-runner-design.md
+local SETTLE_MS = 300
+
+function B.newRun(entries)
+	local r = { lines = {}, cur = 1 }
+	for _, e in ipairs(entries) do
+		r.lines[#r.lines + 1] = { text = e[1], verb = e[2], args = e[3], status = "waiting", tries = 0 }
 	end
-	B.watches = B.watches or {}
-	table.insert(B.watches, w)
-	return w
+	return r
 end
--- judge every watched action that has left the queue and settled; true while any is still pending
-function B.watchTick(p)
-	local q = ISTimedActionQueue.getTimedActionQueue(p).queue
-	local left = {}
-	for _, w in ipairs(B.watches) do
-		local queued = false
-		for _, a in ipairs(q) do if a == w.act then queued = true; break end end
-		if queued or (w.doneMs and getTimestampMs() - w.doneMs < 600) then
-			left[#left + 1] = w
-		else
-			local ok, msg = pcall(w.judge, p, w.doneMs ~= nil)
-			B.res(w.line, ok, ok and msg or tostring(msg):gsub("^.-:%d+: ", ""))
-			-- the lines after it assumed it worked; if none has started yet, don't auto-resume them
-			if not ok and B.pendingIdx == w.idx then B.failedIdx = w.idx end
-		end
+
+function B.curLine() return B.run and B.run.lines[B.run.cur] end
+
+-- queued after a line's own actions: if it runs, the line ran to its end
+ClaudeBotLineEnd = ISBaseTimedAction:derive("ClaudeBotLineEnd")
+function ClaudeBotLineEnd:isValid() return true end
+function ClaudeBotLineEnd:perform() self.l.ended = true; ISBaseTimedAction.perform(self) end
+function ClaudeBotLineEnd:new(p, l)
+	local o = ISBaseTimedAction.new(self, p)
+	o.l, o.maxTime = l, 1
+	o.stopOnWalk, o.stopOnRun, o.stopOnAim = false, false, false
+	return o
+end
+
+-- a command judges its own outcome: fn(p) returns a message or errors with the reason
+function B.setCheck(fn) if B.starting then B.starting.check = fn end end
+
+function B.startLine(p, l)
+	l.status, l.tries = "running", l.tries + 1
+	l.ended, l.failMsg, l.check, l.task = nil, nil, nil, nil
+	B.starting = l
+	local ok, msg = pcall(B.cmds[l.verb] or B.immediate[l.verb], p, l.args, l.text)
+	B.starting = nil
+	B.res(l.text, ok, ok and msg or tostring(msg))
+	if not ok then l.status = "failed"; return end
+	if B.immediate[l.verb] then l.status = "done"; return end
+	if B.task then l.task = B.task; return end
+	-- `fight` runs as B.fight, not queued actions: it's done when the fight is (the runner holds meanwhile)
+	if B.fight then l.ended = true; return end
+	Q(ClaudeBotLineEnd:new(p, l))
+end
+
+-- a line failed: everything after it is NOT RUN, and the turn ends
+function B.failRun(p, l)
+	local r = B.run
+	for i = r.cur + 1, #r.lines do
+		r.lines[i].status = "notrun"
+		B.res(r.lines[i].text, false, "NOT RUN: '" .. l.text .. "' failed")
 	end
-	B.watches = #left > 0 and left or nil
-	return B.watches ~= nil
+	r.cur = #r.lines + 1
+	ISTimedActionQueue.clear(p)
+	B.endTurn(l.task and ("task failed: " .. l.text) or "done")
+end
+
+-- actions started mid-swing are rejected; let a swing finish (force it after 1.5 s)
+function B.swingSettled(p)
+	local swinging = try(function() return p:isPerformingAttackAnimation() end) or p:getCurrentState() == SwipeStatePlayer.instance()
+	if not swinging then B.swingSince = nil; return true end
+	B.swingSince = B.swingSince or getTimestampMs()
+	if getTimestampMs() - B.swingSince > 1500 then
+		p:setPerformingAttackAnimation(false); p:setIsAiming(false); p:setAttackStarted(false)
+		p:changeState(IdleState.instance())
+	end
+	return false
+end
+
+function B.runTick(p)
+	local r = B.run
+	if not r then return end
+	if B.fight or B.fleeing or B.bash or p:isAsleep() or B.busyState(p:getCurrentState()) then r.quietSince = nil; return end
+	local q = ISTimedActionQueue.getTimedActionQueue(p).queue
+	local l = r.lines[r.cur]
+	if not l then
+		if #q > 0 then return end
+		if B.upkeep(p) then return end
+		B.run = nil
+		B.endTurn("done")
+		return
+	end
+	if l.status == "waiting" then
+		-- clear() cancels anything added in the same tick; other actions (rearm, pick-ups) go first
+		if r.clearedTick == B.tickN or #q > 0 or not B.swingSettled(p) then return end
+		B.startLine(p, l)
+		if l.status == "failed" then return B.failRun(p, l) end
+		if l.status == "done" then r.cur = r.cur + 1 end
+		return
+	end
+	if l.task then
+		if B.task == l.task then return end
+		if not l.task.ok then l.status = "failed"; return B.failRun(p, l) end
+		l.status, r.cur = "done", r.cur + 1
+		return
+	end
+	if #q > 0 then r.quietSince = nil; return end
+	r.quietSince = r.quietSince or getTimestampMs()
+	if getTimestampMs() - r.quietSince < SETTLE_MS then return end
+	r.quietSince = nil
+	if l.failMsg then l.status = "failed"
+	elseif l.check then
+		local ok, msg = pcall(l.check, p)
+		B.res(l.text, ok, ok and msg or tostring(msg):gsub("^.-:%d+: ", ""))
+		l.status = ok and "done" or "failed"
+	elseif l.ended then l.status = "done"
+	elseif l.tries < 2 then
+		l.status = "waiting"
+		B.rlog("again: " .. l.text .. " (it was cut short)")
+		return
+	else
+		B.res(l.text, false, "interrupted before it finished")
+		l.status = "failed"
+	end
+	if l.status == "failed" then return B.failRun(p, l) end
+	r.cur = r.cur + 1
 end
 
 -- item counts by name in main inventory, and a "+2 Rag, -1 Tank Top" diff of two of them
@@ -1331,7 +1378,6 @@ function B.endFight(p, ok, msg)
 	B.kills = (B.kills or 0) + kills
 	if f.reflex or f.task then
 		B.rlog((f.shove and "brawl" or "fight") .. ": " .. msg .. ", " .. kills .. " killed, " .. (f.swings or 0) .. " swings")
-		if f.reflex then B.resumePending() end
 	else
 		B.res("fight", ok, msg .. ", " .. kills .. " killed")
 	end
@@ -1464,25 +1510,16 @@ function B.canDefend(p)
 	return pon("rearm") and B.bestMelee(p) ~= nil
 end
 
----------------------------------------------------------------- resumable queue
--- B.pending holds this turn's queued lines ({line, verb, args, idx}); B.pendingIdx is the
--- one running. A reflex that clears the queue sets B.resumeFrom so the rest runs afterwards.
+---------------------------------------------------------------- interrupts
+-- A reflex (fight, rearm, flee, weapon pick-up) takes over: clear the game queue and put the
+-- running line back to waiting, so the runner starts it again afterwards. A reflex isn't the
+-- line's fault, so it doesn't count as a try.
 function B.interrupt(p)
-	-- a fight cutting a travel leg short isn't the path's fault
 	if B.task then B.task.interrupted = true end
-	if not B.task and not B.resumeFrom and B.pending and #B.pending > 0 then
-		B.resumeFrom = B.pendingIdx or 1
-	end
+	local l = B.curLine()
+	if l and l.status == "running" and not l.task then l.status, l.tries = "waiting", l.tries - 1 end
+	if B.run then B.run.clearedTick = B.tickN end
 	ISTimedActionQueue.clear(p)
-end
-
-function B.resumePending()
-	local from = B.resumeFrom
-	B.resumeFrom = nil
-	if not from or not B.pending or from > #B.pending then return end
-	B.deferred = B.deferred or {}
-	for i = from, #B.pending do table.insert(B.deferred, B.pending[i]) end
-	B.rlog("resuming at: " .. B.pending[from][1])
 end
 
 ---------------------------------------------------------------- reflexes
@@ -1635,33 +1672,23 @@ function B.upkeep(p)
 end
 
 ---------------------------------------------------------------- goal commands
--- A goal owns the queue until it finishes: later lines of the turn wait (see
--- ClaudeBotStep:perform) and B.finishTask queues them again.
+-- A goal owns the character until it finishes; the runner holds the turn's later lines meanwhile.
 local function startTask(t, line)
 	t.line = line
-	t.resumeFrom = (B.pendingIdx or 0) + 1
 	B.task = t
 end
 
 function B.finishTask(ok, msg)
 	local t = B.task
 	B.task = nil
+	t.ok = ok
 	B.setSpeedRaw(B.speed)
 	B.res(t.line, ok, msg)
-	if not ok then
-		for i = t.resumeFrom, #(B.pending or {}) do
-			B.res(B.pending[i][1], false, "NOT RUN: task '" .. t.line .. "' failed")
-		end
-		B.pending, B.pendingIdx, B.resumeFrom, B.deferred = {}, nil, nil, nil
-		B.endTurn("task failed: " .. t.line)
-		return
-	end
 	-- walking in through a locked door with its key unlocks it and leaves it that way
-	if t.home then
+	if ok and t.home then
 		local n = B.lockBase(P())
 		if n > 0 then B.rlog("locking " .. n .. " base door" .. (n > 1 and "s" or "") .. " behind you") end
 	end
-	if B.pending and t.resumeFrom <= #B.pending then B.resumeFrom = t.resumeFrom; B.resumePending() end
 end
 
 function B.taskTick(p)
@@ -2539,46 +2566,42 @@ function B.startTurn(id, lines)
 	B.results = {}
 	B.reflexLog = {}
 	B.upkeepTried = {}
-	B.autoResumed = {}
 	if not p or p:isDead() then B.dumpState(p and "dead" or "no player"); return end
 	local cont = false
 	if lines[1] and lines[1]:match("^%s*continue") then cont = true; table.remove(lines, 1) end
-	B.deferred = nil
-	if not cont then
+	if not cont or not B.run then
 		if #ISTimedActionQueue.getTimedActionQueue(p).queue > 0 or p:getCharacterActions():size() > 0 then ISTimedActionQueue.clear(p) end
 		B.fight = nil; B.bash = nil; B.task = nil; B.fleeing = nil
-		B.pending, B.pendingIdx, B.resumeFrom, B.failedIdx, B.watches = {}, nil, nil, nil, nil
+		B.run = nil
 		B.setSpeedRaw(B.speed)
-	elseif not B.task and B.pendingIdx and #ISTimedActionQueue.getTimedActionQueue(p).queue == 0 then
-		-- a hit or a pause dropped the queue: run the interrupted line again, then the rest
-		B.resumeFrom = B.resumeFrom or B.pendingIdx
-		B.resumePending()
+	else
+		-- a hit or a pause stopped the turn: run the interrupted line again, then the rest
+		local l = B.curLine()
+		if l and l.status == "running" and not l.task and #ISTimedActionQueue.getTimedActionQueue(p).queue == 0 then l.status = "waiting" end
 	end
-	B.pending = B.pending or {}
 	if try(function() return p:isPerformingAttackAnimation() end) then p:setPerformingAttackAnimation(false) end
 	p:setIsAiming(false)
-	local needRun = cont
+	local entries = {}
 	for _, l in ipairs(lines) do
 		local args = {}
 		for w in l:gmatch("%S+") do args[#args + 1] = w end
 		local verb = table.remove(args, 1)
-		-- an instant command after a queued one waits its turn ("go x y" then "survey"
-		-- should survey where you end up), so it's queued like the others
-		if B.immediate[verb] and not (B.deferred and #B.deferred > 0) then
+		if not (B.cmds[verb] or B.immediate[verb]) then
+			B.res(l, false, "unknown command")
+		elseif B.immediate[verb] and #entries == 0 and not B.run then
+			-- instant commands before any queued one run now, with the game still paused
 			local ok, msg = pcall(B.immediate[verb], p, args, l)
 			B.res(l, ok, msg)
-			if B.runAfterImm then needRun = true; B.runAfterImm = nil end
-		elseif B.cmds[verb] or B.immediate[verb] then
-			-- queued one tick later: clear() -> StopAllActionQueue cancels anything added this tick
-			local entry = { l, verb, args, #B.pending + 1 }
-			B.pending[#B.pending + 1] = entry
-			B.deferred = B.deferred or {}
-			table.insert(B.deferred, entry)
-			needRun = true
 		else
-			B.res(l, false, "unknown command")
+			entries[#entries + 1] = { l, verb, args }
 		end
 	end
+	if B.run then
+		for _, e in ipairs(B.newRun(entries).lines) do table.insert(B.run.lines, e) end
+	elseif #entries > 0 then
+		B.run = B.newRun(entries)
+	end
+	local needRun = B.run ~= nil and B.run.cur <= #B.run.lines
 	B.turnHealth = p:getBodyDamage():getOverallBodyHealth()
 	B.turnBites = B.biteCount(p)
 	B.turnSeen = B.visibleSet(p)
@@ -2626,22 +2649,6 @@ function B.monitor(p)
 	if bites > (B.turnBites or bites) then B.turnBites = bites; B.turnHealth = h; B.endTurn("BITTEN (health " .. r2(h) .. ")"); return end
 	if B.turnHealth and h < B.turnHealth - B.hurtPause then B.turnHealth = h; B.endTurn("hurt (health " .. r2(h) .. ")"); return end
 	B.tickN = (B.tickN or 0) + 1
-	if B.deferred then
-		-- let a swing finish before queueing; actions started mid-swing are rejected
-		local swinging = try(function() return p:isPerformingAttackAnimation() end) or p:getCurrentState() == SwipeStatePlayer.instance()
-		if swinging then
-			B.swingSince = B.swingSince or getTimestampMs()
-			if getTimestampMs() - B.swingSince > 1500 then
-				p:setPerformingAttackAnimation(false); p:setIsAiming(false); p:setAttackStarted(false)
-				p:changeState(IdleState.instance())
-			end
-			return
-		end
-		B.swingSince = nil
-		for _, d in ipairs(B.deferred) do Q(ClaudeBotStep:new(p, d[1], d[2], d[3], d[4])) end
-		B.deferred = nil
-		return
-	end
 	-- window/fence climbs run as player states after their action leaves the queue
 	local st = p:getCurrentState()
 	-- window, climb and fall animations run as player states after their action leaves the
@@ -2688,31 +2695,7 @@ function B.monitor(p)
 	B.wasAsleep = asleep or nil
 	if nowMin() > B.turnDeadline and not asleep then B.endTurn("turn time limit"); return end
 	if climbing then B.climbSeen = true; return end
-	if B.watches and B.watchTick(p) then return end
-	local q = ISTimedActionQueue.getTimedActionQueue(p).queue
-	-- Combat can defer interrupted commands during this same monitor tick.
-	-- Keep the turn alive until the next tick queues them.
-	if #q == 0 and not B.deferred and not B.fight and not B.bash and not B.fleeing and not B.task and not p:isAsleep() then
-		if B.resumeFrom then B.resumePending(); return end
-		if B.upkeep(p) then return end
-		-- the game clears the whole queue when an action fails or gets interrupted; say
-		-- which lines never ran instead of reporting a clean "done"
-		local ran = B.pendingIdx or 0
-		-- state changes (opening a window, getting up) wipe the queue behind them; pick up
-		-- at the next line once, and only report it if it gets dropped again
-		B.autoResumed = B.autoResumed or {}
-		if B.pending and ran < #B.pending and not B.autoResumed[ran + 1] and B.failedIdx ~= ran then
-			B.autoResumed[ran + 1] = true
-			B.resumeFrom = ran + 1
-			B.resumePending()
-			return
-		end
-		for i = ran + 1, #(B.pending or {}) do
-			B.res(B.pending[i][1], false, "NOT RUN: the queue was dropped after '" .. (B.pending[ran] and B.pending[ran][1] or "?") .. "' (it failed or was interrupted)")
-		end
-		if B.pending then B.pendingIdx = #B.pending end
-		B.endTurn("done")
-	end
+	B.runTick(p)
 end
 
 function B.poll()

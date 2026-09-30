@@ -1,24 +1,22 @@
--- A line whose walk fails must not let the next lines run somewhere else.
--- Seen: `go` PATH FAILED, then `loot` ran at the wrong spot; `take` from an unreachable freezer
--- dropped its check line and the turn jumped to `home`. Both came from the one-time auto-resume
--- treating a failure like a harmless queue wipe.
-local keys = {'zombies', 'upkeep', 'endTurn', 'turnActive', 'tickN', 'deferred', 'results',
-    'fight', 'task', 'fleeing', 'bash', 'pending', 'pendingIdx', 'resumeFrom', 'failedIdx',
-    'turnHealth', 'turnBites', 'turnDeadline', 'turnSeen', 'turnClose',
-    'hordeWarned', 'wasAsleep', 'reflexLog', 'autoResumed'}
+-- A failed walk or PATH FAILED fails its line and the rest are NOT RUN; the walk hook records it.
+local keys = {'zombies', 'upkeep', 'endTurn', 'turnActive', 'tickN', 'results', 'run',
+    'fight', 'task', 'fleeing', 'bash', 'turnHealth', 'turnBites', 'turnDeadline', 'turnSeen',
+    'turnClose', 'hordeWarned', 'wasAsleep', 'reflexLog'}
 local saved = {}
 for _, k in ipairs(keys) do saved[k] = B[k] end
 local ended
-local function fresh(lines)
+local function fresh(texts)
     ended = nil
     B.zombies = function() return {} end
     B.upkeep = function() return false end
     B.endTurn = function(reason) ended = reason; B.turnActive = false end
-    B.turnActive, B.tickN, B.deferred, B.resumeFrom, B.failedIdx = true, 4, nil, nil, nil
-    B.results, B.reflexLog, B.autoResumed = {}, {}, {}
+    B.turnActive, B.tickN, B.results, B.reflexLog = true, 4, {}, {}
     B.task, B.fight, B.fleeing, B.bash = nil, nil, nil, nil
-    B.pending = lines
-    B.pendingIdx = 1
+    local e = {}
+    for _, t in ipairs(texts) do e[#e + 1] = {t, t:match('%S+'), {}} end
+    B.run = B.newRun(e)
+    B.run.lines[1].status, B.run.lines[1].tries = 'running', 1
+    B.run.quietSince = getTimestampMs() - 5000
     B.turnSeen, B.turnClose = {}, {}
     B.turnHealth = p:getBodyDamage():getOverallBodyHealth()
     B.turnBites = B.biteCount(p)
@@ -27,29 +25,25 @@ local function fresh(lines)
 end
 local ok, err = pcall(function()
     assert(#ISTimedActionQueue.getTimedActionQueue(p).queue == 0, 'run this with the game paused and idle')
-    -- 1. the running line failed: the rest is reported NOT RUN and the turn ends
-    fresh({{'go 8175 11673', 'go', {'8175', '11673'}, 1}, {'loot 8175 11673 rice', 'loot', {}, 2}})
+    -- 1. PATH FAILED on the running line: it fails, the rest are NOT RUN, the turn ends
+    fresh({'go 8175 11673', 'loot 8175 11673 rice'})
     B.lineFailed('PATH FAILED (no route)')
     B.monitor(p)
-    assert(not B.deferred and not B.resumeFrom, 'a failed line let the next one run')
-    assert(ended == 'done', 'turn did not end after the failure: ' .. tostring(ended))
+    assert(B.run.lines[1].status == 'failed', 'line not failed: ' .. tostring(B.run.lines[1].status))
+    assert(B.run.lines[2].status == 'notrun', 'next line not NOT RUN')
+    assert(ended == 'done', 'turn did not end: ' .. tostring(ended))
     local last = B.results[#B.results]
-    assert(last and not last.ok and last.cmd == 'loot 8175 11673 rice' and last.msg:find('NOT RUN'), 'skipped line not reported')
-    -- 2. a queue wiped with no failure (window opening, getting up) still resumes once
-    fresh({{'window 1 2 open', 'window', {}, 1}, {'look', 'look', {}, 2}})
-    B.monitor(p)
-    assert(B.deferred and B.deferred[1][1] == 'look', 'a harmless queue wipe no longer resumes')
-    assert(not ended, 'turn ended instead of resuming')
-    -- 3. a walk that can't find a route reports it against the running line
-    fresh({{'take 1 2', 'take', {}, 1}, {'home', 'home', {}, 2}})
+    assert(last.cmd == 'loot 8175 11673 rice' and not last.ok and last.msg:find('^NOT RUN'), 'NOT RUN not reported')
+    -- 2. a failed walk (walkAdj / walkToContainer force-stop) records on the running line
+    fresh({'take 1 2', 'home'})
     local fake = setmetatable({ character = {
         getPathFindBehavior2 = function() return { update = function() return BehaviorResult.Failed end, cancel = function() end } end,
         setPath2 = function() end,
     }, forceStop = function() end }, { __index = ISWalkToTimedAction })
     ISWalkToTimedAction.update(fake)
-    assert(B.failedIdx == 1, 'walk failure was not recorded')
+    assert(B.run.lines[1].failMsg, 'walk failure not recorded on the line')
     last = B.results[#B.results]
     assert(last and not last.ok and last.cmd == 'take 1 2', 'walk failure not reported on its line')
 end)
 for _, k in ipairs(keys) do B[k] = saved[k] end
-R = ok and 'PASS: failed lines stop the rest; harmless wipes resume; failed walks are reported' or ('FAIL: ' .. tostring(err))
+R = ok and 'PASS: failed lines stop the rest; failed walks are recorded on their line' or ('FAIL: ' .. tostring(err))
