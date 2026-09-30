@@ -8,7 +8,7 @@ local ok, err = pcall(function()
     B.run.lines[1].status, B.run.lines[1].tries = 'running', 1
     B.startTurn(12345, {'continue', 'say hi'})
     local r = B.run
-    assert(r and r.cur == 1 and r.lines[1].status == 'waiting', 'interrupted line not restarted')
+    assert(r and r.cur == 1 and r.lines[1].cut and r.lines[1].tries == 0, 'interrupted line not marked cut for a re-run')
     assert(#r.lines == 3 and r.lines[3].text == 'say hi', 'new line not appended')
     B.startTurn(12346, {'look'})
     assert(B.run == nil, 'a fresh instant-only turn should drop the old run')

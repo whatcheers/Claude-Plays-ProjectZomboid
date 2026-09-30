@@ -489,6 +489,14 @@ function B.res(line, ok, msg)
 	B.results[#B.results + 1] = { cmd = line, ok = ok and (msg ~= false), msg = msg ~= nil and tostring(msg) or nil }
 end
 
+-- A check step's result (verifyTaken, put, enter, craft, sleep...). A failure fails the running
+-- line, so the lines that depend on it don't run; a reflex's own step (the line is cut) doesn't.
+function B.stepResult(line, ok, msg)
+	B.res(line, ok, msg)
+	local l = B.curLine()
+	if not ok and l and l.status == "running" and not l.cut then l.failMsg = l.failMsg or tostring(msg) end
+end
+
 -- An action of the running line failed (no route...). Report it on that line and mark it failed
 -- for the runner.
 function B.lineFailed(msg)
@@ -917,7 +925,7 @@ function ClaudeBotCall:perform()
 	self:beginAddingActions()
 	local ok, msg = pcall(self.fn, self.character)
 	self:endAddingActions()
-	if not ok or msg then B.res(self.line, ok, msg) end
+	if not ok or msg then B.stepResult(self.line, ok, msg) end
 	ISBaseTimedAction.perform(self)
 end
 function ClaudeBotCall:new(p, line, fn)
@@ -960,7 +968,7 @@ function B.setCheck(fn) if B.starting then B.starting.check = fn end end
 
 function B.startLine(p, l)
 	l.status, l.tries = "running", l.tries + 1
-	l.ended, l.failMsg, l.check, l.task = nil, nil, nil, nil
+	l.ended, l.failMsg, l.check, l.task, l.cut = nil, nil, nil, nil, nil
 	B.starting = l
 	local ok, msg = pcall(B.cmds[l.verb] or B.immediate[l.verb], p, l.args, l.text)
 	B.starting = nil
@@ -1028,17 +1036,22 @@ function B.runTick(p)
 	r.quietSince = r.quietSince or getTimestampMs()
 	if getTimestampMs() - r.quietSince < SETTLE_MS then return end
 	r.quietSince = nil
+	local again
 	if l.failMsg then l.status = "failed"
 	elseif l.check then
 		local ok, msg = pcall(l.check, p)
-		B.res(l.text, ok, ok and msg or tostring(msg):gsub("^.-:%d+: ", ""))
-		l.status = ok and "done" or "failed"
+		if ok or not l.cut then
+			B.res(l.text, ok, ok and msg or tostring(msg):gsub("^.-:%d+: ", ""))
+			l.status = ok and "done" or "failed"
+		else again = "a reflex or a pause cut it short" end
 	elseif l.ended then l.status = "done"
-	elseif l.tries < 2 then
+	elseif l.cut then again = "a reflex or a pause cut it short"
+	elseif l.tries < 2 then again = "it was cut short" end
+	if again then
 		l.status = "waiting"
-		B.rlog("again: " .. l.text .. " (it was cut short)")
+		B.rlog("again: " .. l.text .. " (" .. again .. ")")
 		return
-	else
+	elseif l.status == "running" then
 		B.res(l.text, false, "interrupted before it finished")
 		l.status = "failed"
 	end
@@ -1283,11 +1296,15 @@ function ClaudeBotSleep:perform()
 	ISBaseTimedAction.perform(self)
 	local p = self.character
 	local why = B.sleepBlocker(p)
-	if why then B.res("sleep", false, "can't sleep: " .. why); return end
+	if why then B.stepResult("sleep", false, "can't sleep: " .. why); return end
 	p:setVariable("ExerciseStarted", false)
 	p:setVariable("ExerciseEnded", true)
 	ISWorldObjectContextMenu.onSleepWalkToComplete(p:getPlayerNum(), self.bed)
-	B.res("sleep", p:isAsleep(), p:isAsleep() and ("asleep " .. (self.bed and "in bed" or "on the floor")) or "didn't fall asleep")
+	B.stepResult("sleep", p:isAsleep(), p:isAsleep() and ("asleep " .. (self.bed and "in bed" or "on the floor")) or "didn't fall asleep")
+	-- falling asleep clears the queue (end marker included); asleep means this line is done, so
+	-- `continue` after waking doesn't sleep again
+	local l = B.curLine()
+	if p:isAsleep() and l and l.status == "running" then l.ended = true end
 end
 function ClaudeBotSleep:new(p, bed)
 	local o = ISBaseTimedAction.new(self, p)
@@ -1511,13 +1528,16 @@ function B.canDefend(p)
 end
 
 ---------------------------------------------------------------- interrupts
--- A reflex (fight, rearm, flee, weapon pick-up) takes over: clear the game queue and put the
--- running line back to waiting, so the runner starts it again afterwards. A reflex isn't the
--- line's fault, so it doesn't count as a try.
+-- A reflex (fight, rearm, flee, weapon pick-up) takes over: clear the game queue and mark the
+-- running line cut. The runner judges it once things settle: a line that had already finished
+-- (or whose check passes) is done, anything else runs again. A reflex isn't the line's fault, so
+-- it doesn't count as a try.
+function B.cutLine(l)
+	if l and l.status == "running" and not l.task and not l.cut then l.cut, l.tries = true, l.tries - 1 end
+end
 function B.interrupt(p)
 	if B.task then B.task.interrupted = true end
-	local l = B.curLine()
-	if l and l.status == "running" and not l.task then l.status, l.tries = "waiting", l.tries - 1 end
+	B.cutLine(B.curLine())
 	if B.run then B.run.clearedTick = B.tickN end
 	ISTimedActionQueue.clear(p)
 end
@@ -1561,8 +1581,13 @@ end
 -- resumes afterwards, as after any reflex. A weapon you `drop` on purpose is let go.
 function B.recoverWeapon(p)
 	local w = p:getPrimaryHandItem()
-	-- held again: a deliberate `drop` of it earlier no longer counts
-	if isMelee(w) then B.heldWeapon = w; if B.letGo then B.letGo[w:getID()] = nil end; return end
+	-- back in hand after being let go: a deliberate `drop` of it earlier no longer counts (not while
+	-- it's still held, or the mark is gone before the drop lands)
+	if isMelee(w) then
+		if B.heldWeapon ~= w and B.letGo then B.letGo[w:getID()] = nil end
+		B.heldWeapon = w
+		return
+	end
 	local h = B.heldWeapon
 	if not h then return end
 	local wo = h:getWorldItem()
@@ -2578,7 +2603,7 @@ function B.startTurn(id, lines)
 	else
 		-- a hit or a pause stopped the turn: run the interrupted line again, then the rest
 		local l = B.curLine()
-		if l and l.status == "running" and not l.task and #ISTimedActionQueue.getTimedActionQueue(p).queue == 0 then l.status = "waiting" end
+		if l and #ISTimedActionQueue.getTimedActionQueue(p).queue == 0 then B.cutLine(l) end
 	end
 	if try(function() return p:isPerformingAttackAnimation() end) then p:setPerformingAttackAnimation(false) end
 	p:setIsAiming(false)

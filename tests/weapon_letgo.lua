@@ -15,6 +15,16 @@ local ok, err = pcall(function()
     B.recoverWeapon(p)
     local log = table.concat(B.reflexLog, '; ')
     assert(log:find('picking it back up', 1, true), 'fell weapon not recovered: [' .. log .. ']')
+    ISTimedActionQueue.clear(p)
+    -- a deliberate `drop` of the weapon in hand: its mark must survive the ticks before the drop lands
+    if w:getWorldItem() then
+        local wo = w:getWorldItem(); wo:getSquare():transmitRemoveItemFromSquare(wo); w:setWorldItem(nil); p:getInventory():AddItem(w)
+    end
+    p:setPrimaryHandItem(w)
+    B.heldWeapon = w
+    B.letGo = {[w:getID()] = true}
+    B.recoverWeapon(p)
+    assert(B.letGo[w:getID()], 'a drop mark was cleared while the weapon was still in hand')
 end)
 ISTimedActionQueue.clear(p)
 -- put the weapon straight back in hand so the test leaves the survivor as it found it

@@ -16,6 +16,7 @@ python pz.py eval (Get-Content 'tests/floor_default.lua' -Raw)
 python pz.py eval (Get-Content 'tests/run_retry.lua' -Raw)
 python pz.py eval (Get-Content 'tests/run_continue.lua' -Raw)
 python pz.py eval (Get-Content 'tests/weapon_letgo.lua' -Raw)
+python pz.py eval (Get-Content 'tests/run_cut.lua' -Raw)
 ```
 
 All should print `PASS` in the eval result. The window test requires the loaded

@@ -31,6 +31,17 @@ Versions follow [semver](https://semver.org/). The version lives in three places
 ### Fixed
 - A weapon once dropped on purpose with `drop` was never recovered from a later fall, even after
   being picked up and held again. `tests/weapon_letgo.lua`.
+- From the final review, before release (`tests/run_cut.lua`):
+  - **A reflex or `continue` no longer re-runs a line that already finished.** Eating a missing
+    item, climbing back through a window, or fighting twice are all gone. An interrupt marks the
+    line `cut` and gives its try back; the runner then judges it: finished or check passes → done,
+    otherwise it runs again.
+  - **A failed check step fails its line.** That covers `take`/`loot` "missing: …", `put`, `enter`,
+    `exit`, `engine`, craft, barricade and build. So `enter` failing stops `engine`/`drive` instead of
+    blaming them.
+  - **`sleep` marks its line finished once asleep**, so `continue` after waking doesn't sleep again.
+  - **A deliberate `drop` of the weapon in hand stays dropped.** Its mark is only cleared when the
+    weapon comes back into the hand, not on the ticks before the drop lands.
 
 ## 0.5.0 — 2026-09-30
 
