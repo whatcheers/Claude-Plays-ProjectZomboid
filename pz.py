@@ -6,6 +6,7 @@
   python pz.py full                  the whole last state (map, nearby, inventory)
   python pz.py map | near | inv      just one section of the last state (inv all: every id)
   python pz.py brief                 a few-line status for checking in between player runs
+  python pz.py report <agent> [file] save an agent's final report for its tab in watch (stdin if no file)
   python pz.py watch [port]          live turn feed in a browser, open to the home network (default 5160)
   python pz.py raw                   dump state.json
   python pz.py reload                hot-reload ClaudeBot.lua in the running game
@@ -275,11 +276,13 @@ def show(s, mode="summary", prev=None):
 
 PREV = os.path.join(D, "prev_inventory.json")
 TURNS = os.path.join(D, "turns.jsonl")
+REPORTS = os.path.join(D, "reports")
 
 
 def log_turn(cmds, s, path=TURNS):
     """Append one finished turn to the log `pz.py watch` serves, whoever is driving."""
-    rec = {"t": round(time.time(), 1), "cmds": cmds}
+    # PZ_AGENT names who's driving (a player run sets it); unset means the supervisor session
+    rec = {"t": round(time.time(), 1), "agent": os.environ.get("PZ_AGENT") or "supervisor", "cmds": cmds}
     if s:
         rec.update({k: s.get(k) for k in ("turn", "reason", "dead", "task", "reflexes")})
         rec["results"] = [{"cmd": r.get("cmd"), "ok": bool(r.get("ok")), "msg": r.get("msg")} for r in s.get("results") or []]
@@ -427,6 +430,25 @@ def do(cmds, timeout=600, full=False):
     show(read_state())
 
 
+def save_report(name, text, rdir=REPORTS):
+    """Keep an agent's final report next to its turns, for its tab in `pz.py watch`."""
+    os.makedirs(rdir, exist_ok=True)
+    with open(os.path.join(rdir, name + ".json"), "w", encoding="utf-8") as f:
+        json.dump({"t": round(time.time(), 1), "text": text}, f)
+
+
+def load_reports(rdir=REPORTS):
+    out = {}
+    for fn in sorted(os.listdir(rdir)) if os.path.isdir(rdir) else []:
+        if fn.endswith(".json"):
+            try:
+                with open(os.path.join(rdir, fn), encoding="utf-8") as f:
+                    out[fn[:-5]] = json.load(f)
+            except (OSError, ValueError):
+                pass
+    return out
+
+
 def watch(port=5160):
     """Serve watch.html and the turn log to the home network (read-only)."""
     from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
@@ -458,7 +480,7 @@ def watch(port=5160):
                 s = read_state()
                 body = {"total": len(lines), "turns": [json.loads(l) for l in lines[start:]],
                         "brief": sec_brief(s) if s and not s.get("running") else None,
-                        "running": bool(s and s.get("running"))}
+                        "running": bool(s and s.get("running")), "reports": load_reports()}
                 return self.send(json.dumps(body).encode(), "application/json")
             self.send_error(404)
 
@@ -500,6 +522,11 @@ if __name__ == "__main__":
         with open(os.path.join(D, "eval.lua"), "w", encoding="utf-8") as f:
             f.write("local p = getSpecificPlayer(0)\nlocal B = ClaudeBot\nlocal R\n" + " ".join(a[1:]) + "\nClaudeBot.evalResult = R\n")
         do(["eval"])
+    elif a[0] == "report" and a[1:]:
+        # python pz.py report <agent> [file]: save that agent's final report (stdin if no file)
+        text = open(a[2], encoding="utf-8").read() if a[2:] else sys.stdin.read()
+        save_report(a[1], text.strip())
+        print(f"saved report for {a[1]}")
     elif a[0] == "watch":
         watch(int(a[1]) if a[1:] else 5160)
     elif a[0] == "do":

@@ -19,3 +19,19 @@ assert r["results"][0] == {"cmd": "go 1 2", "ok": False, "msg": "PATH FAILED (no
 assert r["reflexes"] == ["equipped Axe"] and any("health 90" in b for b in r["brief"])
 assert recs[1]["reason"].startswith("timeout") and recs[1]["cmds"] == ["look"]
 print("PASS: turn log lines")
+
+# agent tag: PZ_AGENT names who sent the turn; unset means the supervisor
+os.environ["PZ_AGENT"] = "fire-run"
+pz.log_turn(["look"], s, path)
+del os.environ["PZ_AGENT"]
+pz.log_turn(["look"], s, path)
+recs = [json.loads(l) for l in open(path, encoding="utf-8")]
+assert recs[2]["agent"] == "fire-run" and recs[3]["agent"] == "supervisor", recs[2:]
+
+# reports: saved per agent, newest wins, served as {name: {t, text}}
+rdir = os.path.join(tempfile.mkdtemp(), "reports")
+pz.save_report("fire-run", "STOPPED: goals done\nTURNS: 13", rdir)
+pz.save_report("fire-run", "STOPPED: second\nTURNS: 2", rdir)
+reps = pz.load_reports(rdir)
+assert list(reps) == ["fire-run"] and reps["fire-run"]["text"].startswith("STOPPED: second"), reps
+print("PASS: agent tags and reports")

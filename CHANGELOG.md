@@ -21,6 +21,13 @@ Versions follow [semver](https://semver.org/). The version lives in three places
   `docs/superpowers/specs/2026-09-30-turn-runner-design.md`.
 - Tests rewritten against the runner; new: `tests/run_retry.lua`, `tests/run_continue.lua`.
 
+### Added
+- **Agent tabs in `pz.py watch`**: All, supervisor, and one tab per player run, each with its turn
+  count and a live dot. A run's tab shows its final report above its turns.
+  - `pz.py do` tags each logged turn with `PZ_AGENT` (default `supervisor`); `pz-player` sets it
+    to its run name.
+  - `pz.py report <agent> [file]` saves a run's report for its tab.
+
 ### Fixed
 - A weapon once dropped on purpose with `drop` was never recovered from a later fall, even after
   being picked up and held again. `tests/weapon_letgo.lua`.

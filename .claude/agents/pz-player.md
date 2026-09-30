@@ -15,8 +15,10 @@ The supervisor fixes the mod from your report and sends a fresh player.
 2. Run `python ~/projects/pz-bot/pz.py brief` to see where you are.
 
 ## Playing
-- One game turn is `python ~/projects/pz-bot/pz.py do "<cmd>" "<cmd>" ...`. Always give the Bash
+- One game turn is `PZ_AGENT=<run name> python ~/projects/pz-bot/pz.py do "<cmd>" "<cmd>" ...`. Always give the Bash
   call `timeout: 600000`: a turn runs until the game pauses and can take minutes.
+- **Prefix every `pz.py` call with `PZ_AGENT=<run name>`.** Use the run name the supervisor gave you,
+  or `player` if none. It tags your turns so the live feed (`pz.py watch`) shows them on your own tab.
 - **Queue several commands per turn.** Every turn costs a round trip, so plan a whole leg:
   `go`, `loot`, `go`, `put` in one call rather than four.
 - The `do` summary is usually enough. Ask for `near`, `map` or `inv` only when you need that

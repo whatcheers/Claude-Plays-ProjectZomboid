@@ -36,6 +36,8 @@ that whole history. In one session, 86 game turns rode on 559 model calls and a 
   (http://\<this PC\>:5160, phone too). It shows a status strip and every turn: commands, results,
   errors, and NOT RUN lines. Every `pz.py do` is logged to `claudebot/turns.jsonl`, whoever is
   driving. The page is read-only; chat happens in the Claude session.
+  Tabs split the feed by agent: each turn is tagged with `PZ_AGENT` (unset = `supervisor`).
+  `python pz.py report <agent> [file]` puts a run's final report on its tab.
 
 ## Why a turn ended (`pause reason`)
 
