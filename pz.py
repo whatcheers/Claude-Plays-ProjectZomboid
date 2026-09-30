@@ -5,6 +5,7 @@
   python pz.py state                 re-print the last summary
   python pz.py full                  the whole last state (map, nearby, inventory)
   python pz.py map | near | inv      just one section of the last state (inv all: every id)
+  python pz.py brief                 a few-line status for checking in between player runs
   python pz.py raw                   dump state.json
   python pz.py reload                hot-reload ClaudeBot.lua in the running game
   python pz.py eval "R = p:getX()"   run Lua in the game (p = player, R = result)
@@ -13,7 +14,7 @@ Set ZOMBOID_DIR if your Zomboid user folder isn't ~/Zomboid.
 """
 import json, os, sys, time
 
-VERSION = "0.2.0"  # keep in step with mod.info and B.VERSION in ClaudeBot.lua
+VERSION = "0.3.0"  # keep in step with mod.info and B.VERSION in ClaudeBot.lua
 
 D = os.path.join(os.environ.get("ZOMBOID_DIR") or os.path.expanduser("~/Zomboid"), "Lua", "claudebot")
 STATE, CMD = os.path.join(D, "state.json"), os.path.join(D, "cmd.txt")
@@ -223,6 +224,36 @@ def sec_summary(s, prev):
     return L
 
 
+def sec_brief(s):
+    """A few lines for a supervisor checking in between player runs: where, how, what's carried."""
+    t, st, pos, b = s.get("time", {}), s.get("stats", {}), s.get("pos") or {}, s.get("base")
+    L = [f"{t.get('month')}/{t.get('day')} {t.get('hour', 0):02d}:{t.get('min', 0):02d} (day {t.get('daysSurvived')})"
+         f" | last pause: {s.get('reason')}" + (" | *** DEAD ***" if s.get("dead") else "")]
+    L.append(f"pos {pos.get('x')},{pos.get('y')},{pos.get('z')} {'outside' if s.get('outside') else 'inside ' + str(s.get('room'))}"
+             f" | base " + (f"{b['x']},{b['y']},{b['z']}" if b else "none") + (f" | fort: {s['fort']}" if s.get("fort") else ""))
+    worst = [f"{w['part']} {w['flags']}" for w in s.get("wounds") or [] if w["flags"] or w["hp"] < 90]
+    high = [f"{k}={v}" for k, v in st.items() if isinstance(v, (int, float)) and 0.25 <= v <= 1 and k != "endurance"]
+    L.append(f"health {s.get('health')} | {' '.join(high) or 'stats ok'}" + (f" | wounds: {'; '.join(worst)}" if worst else ""))
+    inv = flat_items_full(s.get("inventory"))
+    weapons = sorted({i["name"] for i in inv if i.get("weapon")})
+    food = sum(1 for i in inv if "hunger" in i and not i.get("rotten"))
+    water = [i["fluid"] for i in inv if i.get("fluidType") == "Water"]
+    L.append(f"hand: {s.get('primary')} | weapons: {', '.join(weapons) or 'none'} | food {food} | water {' '.join(water) or 'none'}"
+             f" | weight {s.get('weight')}{' OVERLOADED' if s.get('overloaded') else ''}")
+    zs = s.get("zombies") or []
+    if zs:
+        L.append(f"zombies: {len(zs)}, nearest {min(z['d'] for z in zs)} tiles, {sum(1 for z in zs if z.get('targetingMe'))} coming")
+    return L
+
+
+def flat_items_full(items):
+    out = []
+    for i in items or []:
+        out.append(i)
+        out += flat_items_full(i.get("items"))
+    return out
+
+
 def show(s, mode="summary", prev=None):
     if not s:
         print("no state")
@@ -237,7 +268,7 @@ def show(s, mode="summary", prev=None):
         orders = [f"policy: {s.get('policy')}", "base: " + (f"{b['x']},{b['y']},{b['z']}" if b else "none")]
         L = sec_head(s) + sec_body(s, all_wounds=True) + [" | ".join(orders)] + sec_map(s) + sec_near(s) + sec_inv(s)
     else:
-        L = {"map": sec_map, "near": sec_near, "inv": sec_inv}[mode](s)
+        L = {"map": sec_map, "near": sec_near, "inv": sec_inv, "brief": sec_brief}[mode](s)
     print("\n".join(L))
 
 
@@ -386,7 +417,7 @@ if __name__ == "__main__":
         show(read_state())
     elif a[0] == "inv" and a[1:2] == ["all"]:
         print("\n".join(sec_inv(read_state(), group=False)))
-    elif a[0] in ("full", "map", "near", "inv"):
+    elif a[0] in ("full", "map", "near", "inv", "brief"):
         show(read_state(), a[0])
     elif a[0] == "raw":
         print(json.dumps(read_state(), indent=1))

@@ -5,7 +5,7 @@
 --   eval.lua   : optional snippet run by the "eval" command (debugging)
 ClaudeBot = ClaudeBot or {}
 local B = ClaudeBot
-B.VERSION = "0.2.0"  -- keep in step with mod.info and pz.py
+B.VERSION = "0.3.0"  -- keep in step with mod.info and pz.py
 B.results = B.results or {}
 B.turn = B.turn or 0
 B.speed = B.speed or 1
@@ -513,6 +513,22 @@ function B.res(line, ok, msg)
 	B.results[#B.results + 1] = { cmd = line, ok = ok and (msg ~= false), msg = msg ~= nil and tostring(msg) or nil }
 end
 
+-- An action of the running line failed (no route...). Report it on that line and mark it, so the
+-- one-time auto-resume in B.monitor doesn't run the lines after it from the wrong place.
+function B.lineFailed(msg)
+	local e = B.pending and B.pendingIdx and B.pending[B.pendingIdx]
+	B.failedIdx = B.pendingIdx
+	B.res(e and e[1] or "?", false, msg)
+end
+
+-- A failed walk (walkAdj, walkToContainer: take, loot, put...) only force-stops, which wipes
+-- the queue with no callback. Goal tasks watch their own walks.
+B.walkUpdate = B.walkUpdate or ISWalkToTimedAction.update
+function ISWalkToTimedAction:update()
+	B.walkUpdate(self)
+	if self.result == BehaviorResult.Failed and B.turnActive and not B.task then B.lineFailed("couldn't walk there (no route)") end
+end
+
 ---------------------------------------------------------------- commands
 local Q = function(a) ISTimedActionQueue.add(a) end
 local function num(v, name) local n = tonumber(v); if not n then error("need number for " .. (name or "arg")) end return n end
@@ -662,7 +678,7 @@ B.immediate.hurtpause = function(p, a) B.hurtPause = num(a[1]); return "pause af
 
 function B.path(p, x, y, z)
 	local act = ISPathFindAction:pathToLocationF(p, x + 0.5, y + 0.5, z)
-	act:setOnFail(function() B.res("go " .. x .. " " .. y, false, "PATH FAILED (no route)") end)
+	act:setOnFail(function() B.lineFailed("PATH FAILED (no route)") end)
 	Q(act)
 end
 
@@ -2416,7 +2432,7 @@ function B.startTurn(id, lines)
 	if not cont then
 		if #ISTimedActionQueue.getTimedActionQueue(p).queue > 0 or p:getCharacterActions():size() > 0 then ISTimedActionQueue.clear(p) end
 		B.fight = nil; B.bash = nil; B.task = nil; B.fleeing = nil
-		B.pending, B.pendingIdx, B.resumeFrom = {}, nil, nil
+		B.pending, B.pendingIdx, B.resumeFrom, B.failedIdx = {}, nil, nil, nil
 		B.setSpeedRaw(B.speed)
 	elseif not B.task and B.pendingIdx and #ISTimedActionQueue.getTimedActionQueue(p).queue == 0 then
 		-- a hit or a pause dropped the queue: run the interrupted line again, then the rest
@@ -2569,7 +2585,7 @@ function B.monitor(p)
 		-- state changes (opening a window, getting up) wipe the queue behind them; pick up
 		-- at the next line once, and only report it if it gets dropped again
 		B.autoResumed = B.autoResumed or {}
-		if B.pending and ran < #B.pending and not B.autoResumed[ran + 1] then
+		if B.pending and ran < #B.pending and not B.autoResumed[ran + 1] and B.failedIdx ~= ran then
 			B.autoResumed[ran + 1] = true
 			B.resumeFrom = ran + 1
 			B.resumePending()

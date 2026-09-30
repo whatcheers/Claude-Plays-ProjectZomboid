@@ -19,6 +19,20 @@ python pz.py inv     # your inventory
 python pz.py full    # everything (or add --full to a do)
 ```
 
+## Supervisor and player
+
+In Claude Code, keep playing and developing in separate contexts. Every model call re-reads the
+whole conversation, so a game turn played in a session full of mod development costs as much as
+that whole history. In one session, 86 game turns rode on 559 model calls and a context of about
+200k tokens.
+
+- **The supervisor** (your main session) picks goals, reads reports, and fixes and reloads the mod.
+  `python pz.py brief` gives it a few-line status without a full dump.
+- **The player** is the `pz-player` agent (`.claude/agents/pz-player.md`; `install.cmd` installs it
+  for sessions started elsewhere). It gets a goal list and plays until something breaks: bitten,
+  dead, a mod bug seen twice, stuck, or 150 turns. Then it returns a report of about 15 lines,
+  with the bug's exact command and output. It never edits code, and each run starts fresh.
+
 ## Why a turn ended (`pause reason`)
 
 | reason | meaning |

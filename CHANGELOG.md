@@ -4,6 +4,30 @@ Versions follow [semver](https://semver.org/). The version lives in three places
 `modversion` in both `mod.info` files, `B.VERSION` in `ClaudeBot.lua`, and `VERSION` in `pz.py`
 (the driver warns when the game is running a different one). Each release is tagged `vX.Y.Z`.
 
+## 0.3.0 — 2026-09-30
+
+### Added
+- **The `pz-player` agent** (`.claude/agents/pz-player.md`). It plays from a goal list on Sonnet until
+  something breaks (bitten, dead, a mod bug seen twice, stuck, 150 turns). Then it returns a report
+  of about 15 lines, with the bug's exact command and output. It can't edit code, and each run starts fresh.
+  - Measured on the last play sessions: game turns re-read the whole mod-development context, which
+    grew to about 200k tokens (median).
+  - One session spent 559 model calls on 86 turns.
+  - Splitting play (the player) from development (the supervisor session) keeps each turn cheap.
+- `pz.py brief`: a status of about 5 lines (time, position, base, fort, health, wounds, weapons, food,
+  water, zombies) for the supervisor to check in with.
+- `install.cmd` also copies the agent to `~/.claude/agents`, so sessions started outside the repo
+  can use it.
+
+### Fixed
+- A failed line no longer lets the rest of the turn run from the wrong place. The one-time
+  auto-resume after a queue wipe (meant for window opening or getting up) also fired after failures:
+  - after `go` PATH FAILED, the `loot` on the next line ran wherever the character stood;
+  - a `take` whose walk to the container failed printed no check line, and the turn jumped to `home`.
+  Failed walks (`walkAdj`/`walkToContainer`, which only force-stop) are now reported on their
+  line as `couldn't walk there (no route)`, and the lines after a failure are listed as `NOT RUN`.
+  Regression test: `tests/failed_walk.lua`.
+
 ## 0.2.0 — 2026-09-30
 
 ### Added
