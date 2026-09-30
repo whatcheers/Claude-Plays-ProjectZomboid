@@ -89,11 +89,11 @@ IDs are item IDs (`#123456`) from the state; coordinates are world tiles (`x y`,
 | `door x y` | walk to the door on that tile and open or close it |
 | `window x y open\|close\|smash\|clearglass\|climb` | window actions (`climb` is the default). `open`, `close` and `climb` add a check line: `window is open`, `climbed through`, or why not |
 | `take id [id...]` | move items into your main inventory (from containers, bodies, the floor or your bags) |
-| `loot x y [filter words] [max]` | take everything (or names matching the filter, `*` = all) from all containers and the floor on a tile, at most `max`; also searches bags inside containers. E.g. `loot 8143 11727 firefighter axe 2` |
+| `loot x y [filter words] [max]` | take everything (or names matching the filter, `*` = all, `rope,twine` = either) from all containers and the floor on a tile, at most `max`; also searches bags inside containers. E.g. `loot 8143 11727 firefighter axe 2` |
 | `put id x y [n]` | put an item into container `n` (default 1) on a tile; refuses up front if it's full |
 | `pack id [id...]` | move items from main inventory into your worn bag (`take` or `loot` them first). `Name*N` / `Name*` instead of an id picks N / all loose items whose name contains Name |
 | `drop id [id...]` | drop to the floor; takes `Name*N` / `Name*` like `pack` (`drop Rag*`) |
-| `eat id [fraction]` / `drink id [fraction]` | eat or drink (1 = all) |
+| `eat id [fraction]` / `drink id [fraction]` | eat or drink (1 = all); `eat` on pills takes one dose |
 | `drinkat x y` | drink from a sink, toilet or other water source |
 | `fill id x y` | fill a container from a water source |
 | `equip id [2h\|off]` / `unequip id` | hands |

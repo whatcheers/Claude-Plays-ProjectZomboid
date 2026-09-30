@@ -5,7 +5,7 @@
 --   eval.lua   : optional snippet run by the "eval" command (debugging)
 ClaudeBot = ClaudeBot or {}
 local B = ClaudeBot
-B.VERSION = "0.8.0"  -- keep in step with mod.info and pz.py
+B.VERSION = "0.9.0"  -- keep in step with mod.info and pz.py
 B.results = B.results or {}
 B.turn = B.turn or 0
 B.speed = B.speed or 1
@@ -796,7 +796,15 @@ B.cmds.loot = function(p, a)
 	local filter = #words > 0 and table.concat(words, " "):lower() or nil
 	if filter == "*" then filter = nil end
 	local n, taken = 0, {}
-	local function match(it) return not filter or it:getDisplayName():lower():find(filter, 1, true) or it:getFullType():lower():find(filter, 1, true) end
+	-- "rope,twine" matches either
+	local alts = {}
+	for f in (filter or ""):gmatch("[^,]+") do alts[#alts + 1] = f:match("^%s*(.-)%s*$") end
+	local function match(it)
+		if not filter then return true end
+		local dn, ft = it:getDisplayName():lower(), it:getFullType():lower()
+		for _, f in ipairs(alts) do if dn:find(f, 1, true) or ft:find(f, 1, true) then return true end end
+		return false
+	end
 	-- also look inside bags in the container (garbage bags in dumpsters, purses in wardrobes)
 	local function scan(c, depth)
 		local items = c:getItems()
@@ -813,6 +821,7 @@ B.cmds.loot = function(p, a)
 		if n < max and match(it) then toInventory(p, it, nil, wo); n = n + 1; taken[#taken + 1] = { it = it } end
 	end
 	if n > 0 then B.verifyTaken(p, taken, "loot") end
+	if n == 0 then error("nothing" .. (filter and (" matching " .. filter) or "") .. " at " .. a[1] .. "," .. a[2]) end
 	return "looting " .. n .. " items"
 end
 B.cmds.put = function(p, a)
@@ -888,6 +897,11 @@ end
 B.cmds.eat = function(p, a)
 	local it, cont, wo = itemArg(p, a[1])
 	if wo or not cont:isInCharacterInventory(p) then toInventory(p, it, cont, wo) end
+	-- pills aren't food; eatItem errors on them (getDuration on nil)
+	if try(function() return it:hasTag(ItemTag.PILLS) end) or it:getType():find("^Pills") then
+		ISInventoryPaneContextMenu.onPillsItems({it}, 0)
+		return "taking " .. it:getDisplayName()
+	end
 	ISInventoryPaneContextMenu.eatItem(it, tonumber(a[2]) or 1, 0)
 	return "eating " .. it:getDisplayName()
 end
@@ -2657,6 +2671,12 @@ function B.startTurn(id, lines)
 	B.reflexLog = {}
 	B.upkeepTried = {}
 	if not p or p:isDead() then B.dumpState(p and "dead" or "no player"); return end
+	-- a turn that ended mid-sleep (hurt, zombie) leaves this set; the new turn would end at once as "woke up"
+	-- new orders wake you (a hurt/zombie pause can end a turn mid-sleep); `continue` or `sleep` let you sleep on
+	if p:isAsleep() and lines[1] and not lines[1]:match("^%s*continue") and not lines[1]:match("^%s*sleep") then
+		try(function() p:forceAwake() end)
+	end
+	B.wasAsleep = p:isAsleep() or nil
 	local cont = false
 	if lines[1] and lines[1]:match("^%s*continue") then cont = true; table.remove(lines, 1) end
 	if not cont or not B.run then

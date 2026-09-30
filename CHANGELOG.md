@@ -4,6 +4,18 @@ Versions follow [semver](https://semver.org/). The version lives in three places
 `modversion` in both `mod.info` files, `B.VERSION` in `ClaudeBot.lua`, and `VERSION` in `pz.py`
 (the driver warns when the game is running a different one). Each release is tagged `vX.Y.Z`.
 
+## 0.9.0 — 2026-09-30
+
+### Added
+- **`loot x y rope,twine`**: comma-separated alternatives in the filter.
+
+### Fixed
+- **`loot` that matches nothing fails** ("nothing matching rope at x,y") instead of "ok, looting 0 items".
+- **`eat` on pills** takes them with the game's Take Pills action; before it errored (`getDuration` on nil).
+- **A turn that ended mid-sleep** (a `hurt` pause) left the next turn to end at once as "woke up" without
+  running or reporting its lines. New orders now wake the character (unless they start with `sleep` or
+  `continue`), and the sleep tracker resets each turn.
+
 ## 0.8.0 — 2026-09-30
 
 ### Added

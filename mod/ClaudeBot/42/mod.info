@@ -1,7 +1,7 @@
 name=ClaudeBot
 id=ClaudeBot
 author=whatcheers
-modversion=0.8.0
+modversion=0.9.0
 versionMin=42.0.0
 poster=poster.png
 icon=icon.png
