@@ -5,7 +5,7 @@
 --   eval.lua   : optional snippet run by the "eval" command (debugging)
 ClaudeBot = ClaudeBot or {}
 local B = ClaudeBot
-B.VERSION = "0.6.1"  -- keep in step with mod.info and pz.py
+B.VERSION = "0.7.0"  -- keep in step with mod.info and pz.py
 B.results = B.results or {}
 B.turn = B.turn or 0
 B.speed = B.speed or 1

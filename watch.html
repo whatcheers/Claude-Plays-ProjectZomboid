@@ -103,6 +103,15 @@ li .c { color: var(--text-muted); }
 }
 .report .head { font: 700 10px var(--font-display); letter-spacing: .2em; color: var(--alert-blue); margin-bottom: 6px; }
 .report pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.5 var(--font-data); color: var(--phosphor-bright); }
+.feedhead { display: flex; align-items: center; gap: 10px; margin: 18px 0 8px; }
+.feedhead .label { margin: 0; }
+.btn {
+  font: 700 10px/1 var(--font-display); letter-spacing: .15em; text-transform: uppercase;
+  color: var(--amber); background: transparent; border: 1px solid var(--amber); padding: 6px 9px; cursor: pointer;
+}
+.btn:hover { background: var(--amber-subtle); }
+.cleared { font: 12px var(--font-data); color: var(--text-muted); }
+.cleared a { color: var(--alert-blue); cursor: pointer; text-decoration: underline; }
 @media (max-width: 560px) {
   header { position: static; }
   .strip { grid-template-columns: 1fr; }
@@ -124,13 +133,22 @@ li .c { color: var(--text-muted); }
   <div class="label">AGENTS</div>
   <div class="tabs" id="tabs" role="tablist"></div>
   <div id="report"></div>
-  <div class="label">TURN FEED · NEWEST FIRST</div>
+  <div class="feedhead">
+    <div class="label">TURN FEED · NEWEST FIRST</div>
+    <button class="btn" id="clear" title="Hide everything up to now in this browser (the log is kept)">Clear</button>
+    <span class="cleared" id="cleared"></span>
+  </div>
   <div id="feed"><div class="empty">No turns logged yet. Every <code>pz.py do</code> shows up here.</div></div>
 </main>
 <script>
 let total = -1, turns = [], reports = {}, running = false, tab = "all";
 try { tab = localStorage.getItem("tab") || "all"; } catch (e) {}
 const agentOf = t => t.agent || "earlier";
+// Clear hides everything up to a moment, in this browser only; the log on disk is untouched
+let clearedAt = 0;
+try { clearedAt = +localStorage.getItem("clearedAt") || 0; } catch (e) {}
+const visible = () => turns.filter(t => t.t > clearedAt);
+const visibleReports = () => Object.fromEntries(Object.entries(reports).filter(([, r]) => r.t > clearedAt));
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const short = c => (c || "").length > 32 ? c.slice(0, 30) + "…" : c;
@@ -164,8 +182,8 @@ function strip(t, prev) {
 // tabs: All, then each agent in the order it first drove (plus any with only a report)
 function agents() {
   const seen = [];
-  for (const t of turns) if (!seen.includes(agentOf(t))) seen.push(agentOf(t));
-  for (const n of Object.keys(reports)) if (!seen.includes(n)) seen.push(n);
+  for (const t of visible()) if (!seen.includes(agentOf(t))) seen.push(agentOf(t));
+  for (const n of Object.keys(visibleReports())) if (!seen.includes(n)) seen.push(n);
   return seen;
 }
 
@@ -174,7 +192,8 @@ function renderTabs() {
   const names = ["all", ...agents()];
   if (!names.includes(tab)) tab = "all";
   $("tabs").innerHTML = names.map(n => {
-    const mine = n === "all" ? turns : turns.filter(t => agentOf(t) === n);
+    const vis = visible();
+    const mine = n === "all" ? vis : vis.filter(t => agentOf(t) === n);
     const last = mine.length ? mine[mine.length - 1].t : 0;
     const live = n !== "all" && now - last < 90 ? (running ? "run" : "idle") : "";
     return `<button class="tab" role="tab" aria-selected="${n === tab}" data-tab="${esc(n)}">`
@@ -184,15 +203,24 @@ function renderTabs() {
 
 function render() {
   renderTabs();
-  const rep = tab !== "all" && reports[tab];
+  const rep = tab !== "all" && visibleReports()[tab];
   $("report").innerHTML = rep ? `<div class="report"><div class="head">FINAL REPORT · ${hhmmss(rep.t)}</div><pre>${esc(rep.text)}</pre></div>` : "";
-  const shown = tab === "all" ? turns : turns.filter(t => agentOf(t) === tab);
-  if (!shown.length) { $("feed").innerHTML = `<div class="empty">No turns for ${esc(tab)} yet.</div>`; $("count").textContent = ""; return; }
+  $("cleared").innerHTML = clearedAt ? `cleared ${hhmmss(clearedAt)} · <a id="showall">show all</a>` : "";
+  const shown = tab === "all" ? visible() : visible().filter(t => agentOf(t) === tab);
+  if (!shown.length) { $("feed").innerHTML = `<div class="empty">${clearedAt ? "Nothing new since you cleared." : "No turns for " + esc(tab) + " yet."}</div>`; $("count").textContent = ""; return; }
   const out = [];
   for (let i = shown.length - 1; i >= 0; i--) out.push(strip(shown[i], shown[i - 1]));
   $("feed").innerHTML = out.join("");
   $("count").textContent = `${shown.length} turns shown`;
 }
+
+function setCleared(t) {
+  clearedAt = t;
+  try { t ? localStorage.setItem("clearedAt", String(t)) : localStorage.removeItem("clearedAt"); } catch (e) {}
+  render();
+}
+$("clear").addEventListener("click", () => setCleared(Date.now() / 1000));
+$("cleared").addEventListener("click", e => { if (e.target.id === "showall") setCleared(0); });
 
 $("tabs").addEventListener("click", e => {
   const b = e.target.closest(".tab");

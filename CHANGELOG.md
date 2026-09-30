@@ -4,7 +4,14 @@ Versions follow [semver](https://semver.org/). The version lives in three places
 `modversion` in both `mod.info` files, `B.VERSION` in `ClaudeBot.lua`, and `VERSION` in `pz.py`
 (the driver warns when the game is running a different one). Each release is tagged `vX.Y.Z`.
 
-## 0.6.1 — 2026-09-30
+## 0.7.0 — 2026-09-30
+
+### Added
+- **Clear button in `pz.py watch`**, in the turn-feed heading. It hides everything up to now in this
+  browser only; new turns keep appearing, and tab counts and reports follow. `show all` brings the
+  history back. The log on disk is untouched, and other viewers aren't affected.
+
+
 
 ### Fixed (the v0.6.0 review's minor findings; `tests/run_edges.lua`)
 - **A walk that fails outside a line** goes to the reflex log (`... (outside a line)`) instead of
