@@ -4,6 +4,14 @@ Versions follow [semver](https://semver.org/). The version lives in three places
 `modversion` in both `mod.info` files, `B.VERSION` in `ClaudeBot.lua`, and `VERSION` in `pz.py`
 (the driver warns when the game is running a different one). Each release is tagged `vX.Y.Z`.
 
+## 0.10.1 — 2026-09-30
+
+### Fixed
+- **Weapon recovery chased the previous character's weapon.** `B.heldWeapon` survived a death,
+  so the new survivor (Brent) started with an empty hand and the "dropped weapon" reflex walked him
+  60 tiles to the last survivor's body to pick up its bat. It now resets when the character changes,
+  and it only goes after a weapon within 4 tiles on the same floor. A fall drops it at your feet.
+
 ## 0.10.0 — 2026-09-30
 
 ### Changed

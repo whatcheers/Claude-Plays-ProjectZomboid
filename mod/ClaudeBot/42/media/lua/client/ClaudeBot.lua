@@ -5,7 +5,7 @@
 --   eval.lua   : optional snippet run by the "eval" command (debugging)
 ClaudeBot = ClaudeBot or {}
 local B = ClaudeBot
-B.VERSION = "0.10.0"  -- keep in step with mod.info and pz.py
+B.VERSION = "0.10.1"  -- keep in step with mod.info and pz.py
 B.results = B.results or {}
 B.turn = B.turn or 0
 B.speed = B.speed or 1
@@ -1674,6 +1674,9 @@ function B.recoverWeapon(p)
 	local w = p:getPrimaryHandItem()
 	-- back in hand after being let go: a deliberate `drop` of it earlier no longer counts (not while
 	-- it's still held, or the mark is gone before the drop lands)
+	-- a new character after a death: the old one's weapon lies by its body. Brent's first turn
+	-- walked him 60 tiles to Cornelius's corpse "to pick it back up"
+	if B.heldBy ~= p then B.heldWeapon = nil; B.heldBy = p end
 	if isMelee(w) then
 		if B.heldWeapon ~= w and B.letGo then B.letGo[w:getID()] = nil end
 		B.heldWeapon = w
@@ -1690,7 +1693,9 @@ function B.recoverWeapon(p)
 	B.heldWeapon = nil
 	local sq = wo:getSquare()
 	local at = sq and (sq:getX() .. "," .. sq:getY()) or "?"
-	if not pon("rearm") then B.rlog("dropped " .. h:getDisplayName() .. " at " .. at); return end
+	-- a fall drops it at your feet; anything farther isn't this and isn't worth a reflex walk
+	local far = not sq or math.abs(sq:getX() - p:getX()) + math.abs(sq:getY() - p:getY()) > 4 or sq:getZ() ~= math.floor(p:getZ())
+	if far or not pon("rearm") then B.rlog("dropped " .. h:getDisplayName() .. " at " .. at); return end
 	B.interrupt(p)
 	toInventory(p, h, nil, wo)
 	Q(ClaudeBotCall:new(p, "pick up dropped " .. h:getDisplayName(), function(p)
