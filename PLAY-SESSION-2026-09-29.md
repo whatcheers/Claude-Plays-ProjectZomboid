@@ -84,3 +84,25 @@ fire station 8136–8156,11727–11738; more gas cans at the car supply store 81
   after; before, a full container silently refused and `put` said ok.
 - `home` locks the base's exterior doors you have keys for on arrival (walking in through a
   locked door with its key leaves it unlocked; it happened every trip).
+
+## Fence materials run (2026-09-30, game July 11–12)
+
+Goal from the user: gather what a perimeter fence needs, then die near the base.
+
+**The yard** runs x 8147–8163, y 11663–11686. West side 11670–11686 and the south side are tall
+fences (`fencing_01_72/73`, not climbable). The rest is low and climbable (`fencing_01_120/121/122`):
+the whole east side at x=8164, the west side 11663–11669, and the north side 8148–8156. The north
+side has a **7-tile gap, 8157–8163 on y=11663** (the driveway; the van is parked inside).
+
+**Recipes (no skill needed):** Log Wall = 4 Log + 4 bindings (not climbable). Log Fence = 2 Log +
+2 bindings (climbable). Bindings = Rag, dirty rag, Twine, Rope or Sheet Rope.
+
+| pile | what |
+|---|---|
+| gap, around 8158–8161,11664–11666 | ~33 Log, 143 Rag, 5 Rope, 3 Twine |
+| east fence, 8162,11668 | ~21 Log |
+| total | **54 Log**: 7 log walls close the north gap (28 logs), leaving 26 logs for 6 more walls on the east side |
+
+Materials count within 1 tile of where you stand, so stand in the pile and build its neighbours, or
+carry 1 log per trip (9 kg). Every tree within ~45 tiles has been felled apart from one at 8120,11704.
+The next logs are farther out.
