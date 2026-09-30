@@ -15,7 +15,7 @@ Set ZOMBOID_DIR if your Zomboid user folder isn't ~/Zomboid.
 """
 import json, os, sys, time
 
-VERSION = "0.4.0"  # keep in step with mod.info and B.VERSION in ClaudeBot.lua
+VERSION = "0.5.0"  # keep in step with mod.info and B.VERSION in ClaudeBot.lua
 
 D = os.path.join(os.environ.get("ZOMBOID_DIR") or os.path.expanduser("~/Zomboid"), "Lua", "claudebot")
 STATE, CMD = os.path.join(D, "state.json"), os.path.join(D, "cmd.txt")

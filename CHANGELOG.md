@@ -4,6 +4,32 @@ Versions follow [semver](https://semver.org/). The version lives in three places
 `modversion` in both `mod.info` files, `B.VERSION` in `ClaudeBot.lua`, and `VERSION` in `pz.py`
 (the driver warns when the game is running a different one). Each release is tagged `vX.Y.Z`.
 
+## 0.5.0 — 2026-09-30
+
+### Fixed
+- **Weapons dropped in a fall are picked back up.**
+  - Falling while climbing a fence (the fall outcome of `ClimbOverFenceState` calls `dropHandItems`) left the
+    axe on the ground with nothing reported. A player lost its axe that way.
+  - A reflex now notices the held melee weapon on the ground, picks it up, re-equips it, and resumes
+    the interrupted line. A weapon you `drop` on purpose is left alone.
+- **Lines no longer run during window animations.**
+  - Opening, closing and climbing happen in player states that run after the action leaves the queue
+    and wipe the queue when they end.
+  - The next line used to start mid-animation. It saw the window as it was, and its actions were wiped.
+    `open` then `climb` silently didn't climb, and the old auto-resume skipped the lost climb.
+  - Each line now holds until the character settles. The game doesn't consult `waitToStart` here,
+    so it's done in `update()`.
+- **`window open|close|climb` check their outcome.** They report `window is open`, `climbed through`, or
+  `still on the same side (the window is closed, locked, barricaded...)`, and a failure stops the
+  lines after it. It used to always say `ok`.
+- **`go`/`travel` with no floor** use the highest floor at or below yours that has a floor at the target,
+  so walking outside from upstairs no longer fails.
+- Tests: `tests/floor_default.lua`.
+
+### Changed
+- `pz-player` looks after the survivor's needs every turn, before goals: eat, drink, sleep when
+  fatigued, rest, read against stress and boredom, bandage, painkillers.
+
 ## 0.4.0 — 2026-09-30
 
 ### Added

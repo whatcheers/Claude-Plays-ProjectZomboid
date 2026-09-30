@@ -12,6 +12,7 @@ python pz.py eval (Get-Content 'tests/injury_before_resume.lua' -Raw)
 python pz.py eval (Get-Content 'tests/failed_task.lua' -Raw)
 python pz.py eval (Get-Content 'tests/covered_bite.lua' -Raw)
 python pz.py eval (Get-Content 'tests/failed_walk.lua' -Raw)
+python pz.py eval (Get-Content 'tests/floor_default.lua' -Raw)
 ```
 
 All should print `PASS` in the eval result. The window test requires the loaded

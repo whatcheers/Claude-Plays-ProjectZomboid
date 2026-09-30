@@ -5,7 +5,7 @@
 --   eval.lua   : optional snippet run by the "eval" command (debugging)
 ClaudeBot = ClaudeBot or {}
 local B = ClaudeBot
-B.VERSION = "0.4.0"  -- keep in step with mod.info and pz.py
+B.VERSION = "0.5.0"  -- keep in step with mod.info and pz.py
 B.results = B.results or {}
 B.turn = B.turn or 0
 B.speed = B.speed or 1
@@ -466,7 +466,18 @@ end
 ---------------------------------------------------------------- timed actions
 ClaudeBotStep = ISBaseTimedAction:derive("ClaudeBotStep")
 function ClaudeBotStep:isValid() return true end
-function ClaudeBotStep:update() end
+-- A window opens or closes (and a climb happens) in a player state that runs after its action
+-- has left the queue, and wipes what's queued behind it when it ends. So a line holds (maxTime -1)
+-- until that's over and only then runs: otherwise it sees the window as it was, and its own
+-- actions get wiped. (The game doesn't consult waitToStart here.) A line wiped while holding
+-- never ran, so the one-time auto-resume in B.monitor queues it again.
+function ClaudeBotStep:update()
+	if B.busyState(self.character:getCurrentState()) then return end
+	for _, w in ipairs(B.watches or {}) do
+		if w.doneMs and getTimestampMs() - w.doneMs < 600 then return end
+	end
+	self:forceComplete()
+end
 function ClaudeBotStep:start() end
 function ClaudeBotStep:stop() ISBaseTimedAction.stop(self) end
 function ClaudeBotStep:perform()
@@ -484,7 +495,7 @@ end
 function ClaudeBotStep:new(p, line, verb, args, idx)
 	local o = ISBaseTimedAction.new(self, p)
 	o.line, o.verb, o.args, o.idx = line, verb, args, idx
-	o.maxTime = 1
+	o.maxTime = -1
 	o.stopOnWalk, o.stopOnRun, o.stopOnAim = false, false, false
 	return o
 end
@@ -682,9 +693,18 @@ function B.path(p, x, y, z)
 	Q(act)
 end
 
+-- No floor given: the highest floor at or below yours that has a floor at x,y. From upstairs,
+-- a spot outdoors has no square on your level at all, so the path used to fail.
+function B.floorFor(x, y, z)
+	for fz = z, 0, -1 do
+		local sq = sqAt(x, y, fz)
+		if sq and sq:getFloor() then return fz end
+	end
+	return z
+end
 B.cmds.go = function(p, a)
 	local x, y = num(a[1], "x"), num(a[2], "y")
-	local z = tonumber(a[3]) or math.floor(p:getZ())
+	local z = tonumber(a[3]) or B.floorFor(x, y, math.floor(p:getZ()))
 	B.path(p, x, y, z)
 	return "pathing to " .. x .. "," .. y .. "," .. z
 end
@@ -699,6 +719,21 @@ B.cmds.door = function(p, a)
 	if not d then error("no door at " .. a[1] .. "," .. a[2]) end
 	if luautils.walkAdjWindowOrDoor(p, sq, d, true) then Q(ISOpenCloseDoor:new(p, d)) end
 	return (try(function() return d:IsOpen() end) and "closing" or "opening") .. " door"
+end
+-- which side of a window's wall edge the character is on
+local function windowSide(p, w)
+	local sq = w:getSquare()
+	if w:getNorth() then return p:getY() < sq:getY() end
+	return p:getX() < sq:getX()
+end
+local function windowWhy(w)
+	local bits = {}
+	if instanceof(w, "IsoWindow") then
+		if not w:IsOpen() and not w:isSmashed() then bits[#bits + 1] = "closed" end
+		if w:isLocked() or w:isPermaLocked() then bits[#bits + 1] = "locked" end
+	end
+	if try(function() return w:isBarricaded() end) then bits[#bits + 1] = "barricaded" end
+	return #bits > 0 and ("the window is " .. table.concat(bits, ", ")) or "the game didn't do it; something in the way?"
 end
 B.cmds.window = function(p, a)
 	local sq = sqAt(num(a[1]), num(a[2]), math.floor(p:getZ()))
@@ -717,10 +752,25 @@ B.cmds.window = function(p, a)
 		return "window already " .. (verb == "open" and "open" or "closed")
 	end
 	if not luautils.walkAdjWindowOrDoor(p, sq, w, true) then error("can't reach window") end
-	if verb == "open" or verb == "close" then Q(ISOpenCloseWindow:new(p, w))
+	local line = "window " .. a[1] .. " " .. a[2] .. " " .. verb
+	if verb == "open" or verb == "close" then
+		local act = ISOpenCloseWindow:new(p, w)
+		B.watchAction(act, line, function(p)
+			if w:IsOpen() == (verb == "open") then return "window is " .. (verb == "open" and "open" or "closed") end
+			error("still " .. (w:IsOpen() and "open" or "closed") .. " (" .. windowWhy(w) .. ")")
+		end)
+		Q(act)
 	elseif verb == "smash" then Q(ISSmashWindow:new(p, w))
 	elseif verb == "clearglass" then Q(ISRemoveBrokenGlass:new(p, w))
-	elseif verb == "climb" then Q(ISClimbThroughWindow:new(p, w, 0))
+	elseif verb == "climb" then
+		local act = ISClimbThroughWindow:new(p, w, 0)
+		local watch
+		watch = B.watchAction(act, line, function(p, performed)
+			if performed and windowSide(p, w) ~= watch.side then return "climbed through" end
+			error("still on the same side (" .. (performed and "" or "the climb never started; ") .. windowWhy(w) .. ")")
+		end)
+		watch.before = function(p) watch.side = windowSide(p, w) end
+		Q(act)
 	else error("window verb: open|close|smash|clearglass|climb") end
 	return verb .. " window"
 end
@@ -827,6 +877,8 @@ end
 B.cmds.drop = function(p, a)
 	local items = {}
 	for _, v in ipairs(a) do items[#items + 1] = itemArg(p, v) end
+	B.letGo = B.letGo or {}
+	for _, it in ipairs(items) do B.letGo[it:getID()] = true end
 	ISInventoryPaneContextMenu.onDropItems(items, 0)
 	return "dropping " .. #items
 end
@@ -910,6 +962,41 @@ function ClaudeBotCall:new(p, line, fn)
 	o.line, o.fn, o.maxTime = line, fn, 1
 	o.stopOnWalk, o.stopOnRun, o.stopOnAim = false, false, false
 	return o
+end
+
+-- Window actions end in player states that wipe the queue behind them, so a queued check line
+-- would be wiped with it. Instead, watch the action and judge the outcome in B.monitor once the
+-- character has settled. judge(p, performed) returns a message, or errors with the reason.
+function B.watchAction(act, line, judge)
+	local perform = act.perform
+	local w = { act = act, line = line, idx = B.pendingIdx, judge = judge }
+	act.perform = function(self)
+		if w.before then w.before(self.character) end
+		perform(self)
+		w.doneMs = getTimestampMs()
+	end
+	B.watches = B.watches or {}
+	table.insert(B.watches, w)
+	return w
+end
+-- judge every watched action that has left the queue and settled; true while any is still pending
+function B.watchTick(p)
+	local q = ISTimedActionQueue.getTimedActionQueue(p).queue
+	local left = {}
+	for _, w in ipairs(B.watches) do
+		local queued = false
+		for _, a in ipairs(q) do if a == w.act then queued = true; break end end
+		if queued or (w.doneMs and getTimestampMs() - w.doneMs < 600) then
+			left[#left + 1] = w
+		else
+			local ok, msg = pcall(w.judge, p, w.doneMs ~= nil)
+			B.res(w.line, ok, ok and msg or tostring(msg):gsub("^.-:%d+: ", ""))
+			-- the lines after it assumed it worked; if none has started yet, don't auto-resume them
+			if not ok and B.pendingIdx == w.idx then B.failedIdx = w.idx end
+		end
+	end
+	B.watches = #left > 0 and left or nil
+	return B.watches ~= nil
 end
 
 -- item counts by name in main inventory, and a "+2 Rag, -1 Tank Top" diff of two of them
@@ -1432,6 +1519,33 @@ function B.reflexTick(p)
 	end
 end
 
+-- Falling over a fence (the fall outcome of ClimbOverFenceState calls dropHandItems) leaves the
+-- weapon on the ground with nothing said. Notice it and pick it back up; the interrupted line
+-- resumes afterwards, as after any reflex. A weapon you `drop` on purpose is let go.
+function B.recoverWeapon(p)
+	local w = p:getPrimaryHandItem()
+	if isMelee(w) then B.heldWeapon = w; return end
+	local h = B.heldWeapon
+	if not h then return end
+	local wo = h:getWorldItem()
+	if not wo or (B.letGo and B.letGo[h:getID()]) then
+		-- put away, swapped, or dropped on purpose: stop watching it once it has left the hand
+		if h:getContainer() or wo then B.heldWeapon = nil end
+		return
+	end
+	B.heldWeapon = nil
+	local sq = wo:getSquare()
+	local at = sq and (sq:getX() .. "," .. sq:getY()) or "?"
+	if not pon("rearm") then B.rlog("dropped " .. h:getDisplayName() .. " at " .. at); return end
+	B.interrupt(p)
+	toInventory(p, h, nil, wo)
+	Q(ClaudeBotCall:new(p, "pick up dropped " .. h:getDisplayName(), function(p)
+		if h:getContainer() ~= p:getInventory() then error("couldn't get it back; it's on the ground at " .. at) end
+		ISInventoryPaneContextMenu.equipWeapon(h, true, h:isTwoHandWeapon(), 0)
+	end))
+	B.rlog("dropped " .. h:getDisplayName() .. " at " .. at .. " (a fall?); picking it back up")
+end
+
 -- run from a group: pick a free square ~10 tiles away from their centre, veering if blocked
 function B.startFlee(p, zs)
 	local px, py, pz = p:getX(), p:getY(), math.floor(p:getZ())
@@ -1635,7 +1749,8 @@ function B.newTravel(x, y, z)
 end
 
 B.cmds.travel = function(p, a, line)
-	startTask(B.newTravel(num(a[1], "x"), num(a[2], "y"), tonumber(a[3]) or math.floor(p:getZ())), line)
+	local x, y = num(a[1], "x"), num(a[2], "y")
+	startTask(B.newTravel(x, y, tonumber(a[3]) or B.floorFor(x, y, math.floor(p:getZ()))), line)
 	return "traveling"
 end
 
@@ -2432,7 +2547,7 @@ function B.startTurn(id, lines)
 	if not cont then
 		if #ISTimedActionQueue.getTimedActionQueue(p).queue > 0 or p:getCharacterActions():size() > 0 then ISTimedActionQueue.clear(p) end
 		B.fight = nil; B.bash = nil; B.task = nil; B.fleeing = nil
-		B.pending, B.pendingIdx, B.resumeFrom, B.failedIdx = {}, nil, nil, nil
+		B.pending, B.pendingIdx, B.resumeFrom, B.failedIdx, B.watches = {}, nil, nil, nil, nil
 		B.setSpeedRaw(B.speed)
 	elseif not B.task and B.pendingIdx and #ISTimedActionQueue.getTimedActionQueue(p).queue == 0 then
 		-- a hit or a pause dropped the queue: run the interrupted line again, then the rest
@@ -2534,7 +2649,7 @@ function B.monitor(p)
 	local climbing = B.busyState(st) or (try(function() return p:isClimbing() end) or false)
 	if B.fight then B.fightTick(p)
 	elseif B.fleeing then B.fleeTick(p)
-	elseif not B.bash and not climbing and not p:isAsleep() and B.tickN % 3 == 0 then B.reflexTick(p) end
+	elseif not B.bash and not climbing and not p:isAsleep() and B.tickN % 3 == 0 then B.recoverWeapon(p); B.reflexTick(p) end
 	if B.bash then B.bashTick(p) end
 	if not B.turnActive then return end
 	if B.task and not B.fight and not B.fleeing and not climbing then B.taskTick(p) end
@@ -2573,6 +2688,7 @@ function B.monitor(p)
 	B.wasAsleep = asleep or nil
 	if nowMin() > B.turnDeadline and not asleep then B.endTurn("turn time limit"); return end
 	if climbing then B.climbSeen = true; return end
+	if B.watches and B.watchTick(p) then return end
 	local q = ISTimedActionQueue.getTimedActionQueue(p).queue
 	-- Combat can defer interrupted commands during this same monitor tick.
 	-- Keep the turn alive until the next tick queues them.

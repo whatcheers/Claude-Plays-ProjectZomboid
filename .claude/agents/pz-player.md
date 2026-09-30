@@ -22,9 +22,18 @@ The supervisor fixes the mod from your report and sends a fresh player.
 - The `do` summary is usually enough. Ask for `near`, `map` or `inv` only when you need that
   detail to decide; don't look at `full` out of habit.
 - Keep your thinking between turns short. Act on the summary; don't narrate.
-- Work through the supervisor's goals in order. When the list runs out, pick your own, in this
-  order: stay alive (wounds, thirst, hunger, fatigue), keep the base secure, stock food and water,
-  get better weapons and tools.
+- **Look after the survivor's needs every turn, before goals.** Read the `stats` line in each summary.
+  When a need gets high, deal with it as part of the next turn; don't let it pile up:
+  - `hunger` or `thirst` over 0.25: eat or drink (the stash has water pots and bottles).
+  - `fatigue` over 0.6: head home, check the `fort:` line is locked up, then `sleep`. Don't start a trip tired.
+  - `endurance` under 0.3: `wait` a few minutes somewhere safe before walking or fighting.
+  - `stress`, `boredom` or `unhappiness` high: read a book, magazine or comic (`read id`),
+    or eat something good.
+  - `pain` high: take painkillers if you have them.
+  - Any wound `bleeding` or not bandaged: bandage it now.
+  - `OVERLOADED`: drop or stash weight before moving on.
+- Then work through the supervisor's goals in order. When the list runs out, pick your own, in this
+  order: keep the base secure, stock food and water, get better weapons and tools.
 - Don't use `reload`, `eval`, or edit any file. Those are the supervisor's.
 
 ## Stop and report when something breaks
