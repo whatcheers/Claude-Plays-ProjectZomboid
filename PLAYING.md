@@ -82,6 +82,11 @@ IDs are item IDs (`#123456`) from the state; coordinates are world tiles (`x y`,
 | `chop x y` | fell the tree on that tile with your best axe; logs and branches drop on the stump's tile |
 | `build Entity x y [w\|n]` | place a build-menu entity on a tile's west or north edge, e.g. `build LogFence x y w`. Materials count from inventory **and the 8 tiles around you**, so build next to heavy ones (logs) instead of carrying them. Skill-gated ones (wooden fences need Carpentry 3) fail with "can't build" |
 | `sleep [x y \| floor]` | walk to the nearest bed on this floor (or the one at x y) and sleep; no bed = floor. Turn ends on waking |
+| `enter [x y]` | walk to the car at x y (or the nearest within 8 tiles) and get in the driver's seat |
+| `engine [off]` | start the engine (needs its key in inventory; can fail, just try again) or shut it off |
+| `drive x y [x y ...] [max=kmh]` | drive through the waypoints (default 25 km/h). Pick them along roads, every corner a waypoint. Follows the line between waypoints, K-turns when the next one is behind you, backs up when blocked, brakes to a stop at the last. **Takes over the game window's keyboard** (see below) |
+| `reverse [tiles] [left\|right]` | back up that far (default 4), optionally steering, then stop. Use it to get out of a nose-in spot first |
+| `exit` | get out |
 | `fight [minutes] [hold]` | melee the nearest zombie. By default it **hunts** visible zombies within 14 tiles; `hold` only swings at ones that reach you. Ends when none are left, time is up, 3+ are within 2 tiles, or endurance runs low. Put it **last** in a turn. |
 
 ## Reading the state
@@ -120,6 +125,20 @@ C container   ~ water source   i items on the floor   ? not seen yet
 - `OVERLOADED` in the summary means over 1.25× your carry limit: you're slow, which is what gets
   you caught. Carry 3–4 planks (3 kg each) per trip.
 - No skill yet? A log fence (2 logs + 2 rags) needs none: `chop` a tree, stand by the logs, `build LogFence`.
+
+## Driving
+
+Lua can't work the pedals: the car reads `GameKeyboard`, which has no setter. So `drive` and
+`reverse` decide which keys to hold every tick and write them to `claudebot/keys.txt`, and
+`pz.py do` presses them in the game window with `SendInput` (W/A/S/D/Space as scancodes; change
+`SCAN` in pz.py if your binds differ). It brings the window to the front once when a drive starts.
+If you click away mid-drive, it lets go of every key and leaves the window alone until the next
+turn, so a human can step in.
+
+- `cars [radius]` (instant) lists vehicles nearby: gas, whether you carry the key, engine, locked.
+- Parked cars are the main hazard. Waypoints that pass beside one in a turn will clip it.
+- Every drive result reports back-ups, K-turn moves, steering flips and the worst distance off
+  the line, so you can tell a clean drive from a lucky one.
 
 ## Known game bugs (Build 42)
 

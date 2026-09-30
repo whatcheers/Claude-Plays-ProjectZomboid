@@ -5,7 +5,7 @@
 --   eval.lua   : optional snippet run by the "eval" command (debugging)
 ClaudeBot = ClaudeBot or {}
 local B = ClaudeBot
-B.VERSION = 1
+B.VERSION = "0.2.0"  -- keep in step with mod.info and pz.py
 B.results = B.results or {}
 B.turn = B.turn or 0
 B.speed = B.speed or 1
@@ -105,6 +105,9 @@ end
 local function canSee(p, z)
 	local sq = z:getCurrentSquare()
 	if sq and try(function() return sq:isCanSee(0) end) then return true end
+	-- from a car seat the square vision check misses zombies in plain view (one walked up
+	-- to the house and got run over without a pause); ask the character directly
+	if p:getVehicle() and try(function() return p:CanSee(z) end) then return true end
 	return false
 end
 
@@ -112,6 +115,9 @@ function B.zombies(p, radius)
 	local out = {}
 	local list = getCell():getZombieList()
 	local px, py, pz = p:getX(), p:getY(), math.floor(p:getZ())
+	-- in a car, measure from the car: the driver sits ~2.5 tiles behind the bumper
+	local car = p:getVehicle()
+	if car then px, py = car:getX(), car:getY() end
 	for i = 0, list:size() - 1 do
 		local z = list:get(i)
 		if z and z:isDead() then
@@ -1378,7 +1384,7 @@ end
 
 ---------------------------------------------------------------- reflexes
 function B.reflexTick(p)
-	if B.policy.melee ~= "auto" then return end
+	if B.policy.melee ~= "auto" or p:getVehicle() then return end
 	local zs = {}
 	for _, e in ipairs(B.zombies(p, 3.5)) do if e.seen then zs[#zs + 1] = e end end
 	if #zs == 0 then return end
@@ -1642,6 +1648,265 @@ B.cmds.home = function(p, a, line)
 end
 
 -- the building you're in, or the nearest one within maxD tiles (a BuildingDef)
+---------------------------------------------------------------- vehicles
+-- Lua can't press the car's pedals: CarController reads GameKeyboard, which has no setter.
+-- So `drive` decides which keys to hold every tick and writes them to keys.txt, and pz.py
+-- presses them in the game window (SendInput) until the turn ends.
+local function vehName(v) return try(function() return v:getScript():getName() end) or "vehicle" end
+
+function B.vehicles(p, r)
+	local out, seen = {}, {}
+	local px, py = math.floor(p:getX()), math.floor(p:getY())
+	for x = px - r, px + r do for y = py - r, py + r do
+		local sq = sqAt(x, y, 0)
+		local v = sq and sq:getVehicleContainer()
+		if v and not seen[v] then
+			seen[v] = true
+			local dx, dy = v:getX() - p:getX(), v:getY() - p:getY()
+			out[#out + 1] = { v = v, d = math.sqrt(dx * dx + dy * dy) }
+		end
+	end end
+	table.sort(out, function(a, b) return a.d < b.d end)
+	return out
+end
+
+function B.vehInfo(p, v)
+	local s = vehName(v) .. " @" .. math.floor(v:getX()) .. "," .. math.floor(v:getY())
+	local gas = try(function() return v:getPartById("GasTank") end)
+	if gas then s = s .. string.format(" gas %.0f/%.0f", gas:getContainerContentAmount(), gas:getContainerCapacity()) end
+	local key = try(function() return p:getInventory():haveThisKeyId(v:getKeyId()) end) or try(function() return v:isKeysInIgnition() end)
+	s = s .. (key and " KEY" or " no key")
+	if try(function() return v:isEngineRunning() end) then s = s .. " engine on" end
+	if try(function() return v:isAnyDoorLocked() end) then s = s .. " locked" end
+	if v:getDriver() then s = s .. (v:getDriver() == p and " (you drive)" or " (occupied)") end
+	return s
+end
+
+-- cars [radius]: vehicles nearby, nearest first
+B.immediate.cars = function(p, a)
+	local list = B.vehicles(p, tonumber(a[1]) or 30)
+	local out = {}
+	for i = 1, math.min(#list, 12) do out[#out + 1] = r2(list[i].d) .. "m " .. B.vehInfo(p, list[i].v) end
+	return #list .. " vehicles\n      " .. table.concat(out, "\n      ")
+end
+
+local function vehicleArg(p, a)
+	if a[1] and a[2] then
+		local sq = sqAt(num(a[1]), num(a[2]), 0)
+		local v = sq and sq:getVehicleContainer()
+		if not v then error("no vehicle at " .. a[1] .. "," .. a[2]) end
+		return v
+	end
+	local list = B.vehicles(p, 8)
+	if not list[1] then error("no vehicle within 8 tiles") end
+	return list[1].v
+end
+
+-- enter [x y]: get into the driver's seat of the car at x y (or the nearest one)
+B.cmds.enter = function(p, a, line)
+	if p:getVehicle() then error("already in a vehicle") end
+	local v = vehicleArg(p, a)
+	ISVehicleMenu.onEnter(p, v, 0)
+	Q(ClaudeBotCall:new(p, line, function(pp)
+		if pp:getVehicle() == v and v:isDriver(pp) then return "in the driver's seat: " .. B.vehInfo(pp, v) end
+		error("didn't get in (seat blocked, or the path failed)")
+	end))
+	return "getting into " .. vehName(v)
+end
+
+local function driving(p)
+	local v = p:getVehicle()
+	if not v or not v:isDriver(p) then error("not in a driver's seat") end
+	return v
+end
+
+-- engine [off]: start (needs the key or a hotwire) or shut off the engine
+B.cmds.engine = function(p, a, line)
+	local v = driving(p)
+	if a[1] == "off" then
+		Q(ISShutOffVehicleEngine:new(p))
+		return "shutting off"
+	end
+	if v:isEngineRunning() then return "already running" end
+	Q(ISStartVehicleEngine:new(p))
+	Q(ClaudeBotWait:new(p, 1))
+	Q(ClaudeBotCall:new(p, line, function(pp)
+		if v:isEngineRunning() or v:isEngineStarted() then return "engine running" end
+		error("engine didn't start (try again; cold or damaged engines fail)")
+	end))
+	return "starting the engine"
+end
+
+-- exit: stop and get out
+B.cmds.exit = function(p, a, line)
+	driving(p)
+	B.setKeys("")
+	ISVehicleMenu.onExit(p)
+	Q(ClaudeBotCall:new(p, line, function(pp)
+		if pp:getVehicle() then error("still in the vehicle (exit blocked?)") end
+		return "out at " .. math.floor(pp:getX()) .. "," .. math.floor(pp:getY())
+	end))
+	return "getting out"
+end
+
+function B.setKeys(k)
+	if k == B.keysHeld then return end
+	B.keysHeld = k
+	B.keySeq = (B.keySeq or 0) + 1
+	B.writeFile("keys.txt", B.keySeq .. "\n" .. k .. "\n")
+end
+
+local function wrapAng(a)
+	while a > math.pi do a = a - 2 * math.pi end
+	while a < -math.pi do a = a + 2 * math.pi end
+	return a
+end
+
+-- drive: pure pursuit through the waypoints; slow for turns, brake to a stop at the end
+local function driveTick(t, p)
+	local v = p:getVehicle()
+	if not v or not v:isDriver(p) then B.setKeys(""); return B.finishTask(false, "not in a driver's seat") end
+	if not v:isEngineRunning() then B.setKeys(""); return B.finishTask(false, "engine isn't running (engine)") end
+	local now = getTimestampMs()
+	-- a pause stops the ticks but not the clock; don't count it as being stuck
+	if t.lastMs and now - t.lastMs > 500 then
+		t.stuckSince = nil
+		if t.revUntil then t.revUntil = now + 1200 end
+	end
+	t.lastMs = now
+	local vx, vy = v:getX(), v:getY()
+	local speed = v:getCurrentSpeedKmHour()
+	local pt = t.pts[t.i]
+	local dx, dy = pt[1] + 0.5 - vx, pt[2] + 0.5 - vy
+	local d = math.sqrt(dx * dx + dy * dy)
+	local last = t.i == #t.pts
+	t.dist = d
+	if not last and d < 4 then t.i = t.i + 1; return end
+	if last and d < 3 then
+		if math.abs(speed) > 1 then B.setKeys("SPACE"); return end
+		B.setKeys("")
+		return B.finishTask(true, "arrived at " .. math.floor(vx) .. "," .. math.floor(vy) .. " (" .. #t.pts .. " waypoints, " .. t.stucks .. " back-ups, " .. (t.kturns or 0) .. " K-turn moves, " .. (t.flips or 0) .. " steering flips, worst " .. r2(t.maxOff or 0) .. " tiles off the line)")
+	end
+	local f = v:getForwardVector(Vector3f.new())
+	-- aim at a point LOOK tiles ahead on the segment from the previous waypoint, not at the
+	-- waypoint itself: aiming straight at it cuts corners and weaves across the road
+	local ax, ay = pt[1] + 0.5, pt[2] + 0.5
+	local prev = t.pts[t.i - 1] or t.start
+	local sx, sy = prev[1] + 0.5, prev[2] + 0.5
+	local lx, ly = ax - sx, ay - sy
+	local len = math.sqrt(lx * lx + ly * ly)
+	if len > 1 and d > 4 then
+		local ux, uy = lx / len, ly / len
+		local proj = (vx - sx) * ux + (vy - sy) * uy
+		t.maxOff = math.max(t.maxOff or 0, math.abs((vx - sx) * uy - (vy - sy) * ux))
+		local s = math.min(len, math.max(0, proj) + 4)
+		ax, ay = sx + ux * s, sy + uy * s
+	end
+	local err = wrapAng(math.atan2(ay - vy, ax - vx) - math.atan2(f:z(), f:x()))
+	if t.revUntil and now < t.revUntil then
+		-- backing up flips the steering: swing the nose toward where you want to go
+		B.setKeys("S " .. (err < 0 and "D" or "A"))
+		return
+	end
+	t.revUntil = nil
+	-- target well behind: a K-turn. Short full-lock pulls forward, short reverses on the
+	-- opposite lock. Driving it out in one arc needs a whole street and hits the parked cars.
+	if not t.kturn and math.abs(err) > 1.9 then t.kturn = { fwd = true, x = vx, y = vy, at = now, n = 0 } end
+	if t.kturn then
+		local k = t.kturn
+		if math.abs(err) < 0.9 then
+			t.kturn = nil
+		else
+			local mx, my = vx - k.x, vy - k.y
+			local moved = math.sqrt(mx * mx + my * my)
+			if moved > 2 or now - k.at > 2500 then
+				if math.abs(speed) > 1 then B.setKeys("SPACE"); return end
+				k.fwd, k.x, k.y, k.at, k.n = not k.fwd, vx, vy, now, k.n + 1
+				t.kturns = (t.kturns or 0) + 1
+				if k.n > 12 then B.setKeys(""); return B.finishTask(false, "couldn't turn around at " .. math.floor(vx) .. "," .. math.floor(vy) .. " (no room?)") end
+			end
+			local lock = err < 0 and "A" or "D"
+			if k.fwd then B.setKeys((math.abs(speed) < 6 and "W " or "") .. lock)
+			else B.setKeys((math.abs(speed) < 6 and "S " or "") .. (lock == "A" and "D" or "A")) end
+			return
+		end
+	end
+	local keys = {}
+	-- steering is on/off, so pulse it: hold the key for a share of each 250 ms that grows
+	-- with the error (full lock only past ~0.5 rad). Holding it on any error overshoots.
+	local duty = math.min(1, math.max(0, (math.abs(err) - 0.03) / 0.5))
+	if duty > 0 and (now % 250) < duty * 250 then keys[#keys + 1] = err < 0 and "A" or "D" end
+	local side = err < -0.03 and -1 or (err > 0.03 and 1 or 0)
+	if side ~= 0 and t.side and side ~= t.side then t.flips = (t.flips or 0) + 1 end
+	if side ~= 0 then t.side = side end
+	local target = t.max
+	if math.abs(err) > 0.4 then target = math.min(target, 12) end
+	if math.abs(err) > 1.2 then target = math.min(target, 7) end
+	if last then target = math.min(target, 4 + d * 1.5) end
+	local gas = false
+	if speed < target - 1 then keys[#keys + 1] = "W"; gas = true
+	elseif speed > target + 4 then keys[#keys + 1] = "SPACE" end
+	-- pressing the gas without moving: something's in the way; back up and try again
+	if gas and speed < 1.5 then
+		t.stuckSince = t.stuckSince or now
+		if now - t.stuckSince > 2500 then
+			t.stuckSince = nil
+			t.stucks = t.stucks + 1
+			if t.stucks > 5 then B.setKeys(""); return B.finishTask(false, "STUCK at " .. math.floor(vx) .. "," .. math.floor(vy) .. " after 5 back-ups; " .. r2(d) .. " tiles from waypoint " .. t.i) end
+			t.revUntil = now + 1500
+		end
+	else
+		t.stuckSince = nil
+	end
+	B.setKeys(table.concat(keys, " "))
+end
+
+-- reverse [tiles] [left|right]: back straight up (or steering) that far, then stop
+local function reverseTick(t, p)
+	local v = p:getVehicle()
+	if not v or not v:isDriver(p) or not v:isEngineRunning() then B.setKeys(""); return B.finishTask(false, "not driving a running vehicle") end
+	local now = getTimestampMs()
+	if t.lastMs and now - t.lastMs > 500 then t.movedAt = now end
+	t.lastMs = now
+	local dx, dy = v:getX() - t.x0, v:getY() - t.y0
+	local d = math.sqrt(dx * dx + dy * dy)
+	local speed = v:getCurrentSpeedKmHour()
+	if d >= t.dist then
+		if math.abs(speed) > 1 then B.setKeys("SPACE"); return end
+		B.setKeys("")
+		return B.finishTask(true, "backed up " .. r2(d) .. " tiles to " .. math.floor(v:getX()) .. "," .. math.floor(v:getY()))
+	end
+	if math.abs(speed) > 1.5 then t.movedAt = now end
+	if now - t.movedAt > 3000 then B.setKeys(""); return B.finishTask(false, "blocked after backing up " .. r2(d) .. " tiles") end
+	B.setKeys((math.abs(speed) < 8 and "S" or "") .. (t.steer and " " .. t.steer or ""))
+end
+
+B.cmds.reverse = function(p, a, line)
+	local v = driving(p)
+	local steer = (a[2] == "left" and "A") or (a[2] == "right" and "D") or nil
+	B.setSpeedRaw(1)
+	startTask({ kind = "reverse", dist = tonumber(a[1]) or 4, steer = steer, x0 = v:getX(), y0 = v:getY(), movedAt = getTimestampMs(), tick = reverseTick,
+		status = function(t) return "reversing" end }, line)
+	return "backing up " .. (tonumber(a[1]) or 4) .. " tiles"
+end
+
+-- drive x y [x y ...] [max=kmh]: drive through waypoints (pick them along roads)
+B.cmds.drive = function(p, a, line)
+	driving(p)
+	local pts, max, nums = {}, 25, {}
+	for _, w in ipairs(a) do
+		local m = w:match("^max=(%d+)$")
+		if m then max = tonumber(m) else nums[#nums + 1] = num(w, "coordinate") end
+	end
+	if #nums < 2 or #nums % 2 == 1 then error("need x y pairs") end
+	for i = 1, #nums, 2 do pts[#pts + 1] = { nums[i], nums[i + 1] } end
+	B.setSpeedRaw(1)
+	local v = p:getVehicle()
+	startTask({ kind = "drive", pts = pts, i = 1, max = max, start = { math.floor(v:getX()), math.floor(v:getY()) }, stucks = 0, tick = driveTick,
+		status = function(t) return "drive to waypoint " .. t.i .. "/" .. #t.pts .. " (" .. r2(t.dist or 0) .. " tiles)" end }, line)
+	return "driving " .. #pts .. " waypoints at up to " .. max .. " km/h"
+end
+
 function B.buildingAt(p, maxD)
 	local sq = p:getCurrentSquare()
 	local b = sq and sq:getBuilding()
@@ -2204,6 +2469,7 @@ end
 
 function B.endTurn(reason)
 	B.turnActive = false
+	if B.keysHeld and B.keysHeld ~= "" then B.setKeys("") end
 	B.setPaused(true)
 	B.dumpState(reason)
 end
