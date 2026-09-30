@@ -1,7 +1,7 @@
 name=ClaudeBot
 id=ClaudeBot
 author=whatcheers
-modversion=0.9.0
+modversion=0.10.0
 versionMin=42.0.0
 poster=poster.png
 description=Turn-based remote control so an AI agent (or any script) can play singleplayer. Reads commands from Zomboid/Lua/claudebot/cmd.txt, runs them, auto-pauses and writes state.json. Driver and docs: see README.

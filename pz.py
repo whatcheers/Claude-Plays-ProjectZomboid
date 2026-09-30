@@ -16,7 +16,7 @@ Set ZOMBOID_DIR if your Zomboid user folder isn't ~/Zomboid.
 """
 import json, os, sys, time
 
-VERSION = "0.9.0"  # keep in step with mod.info and B.VERSION in ClaudeBot.lua
+VERSION = "0.10.0"  # keep in step with mod.info and B.VERSION in ClaudeBot.lua
 
 D = os.path.join(os.environ.get("ZOMBOID_DIR") or os.path.expanduser("~/Zomboid"), "Lua", "claudebot")
 STATE, CMD = os.path.join(D, "state.json"), os.path.join(D, "cmd.txt")
@@ -88,6 +88,11 @@ def sec_head(s):
         L.append("LOADER ERR: " + s["loaderErr"])
     for r in s.get("results") or []:
         L.append(f"  {'ok ' if r.get('ok') else 'ERR'} {r.get('cmd')}: {r.get('msg')}")
+    u = s.get("unpausedIdle")
+    if u:
+        L.append(f"!! the game ran unpaused between turns: from {u.get('at')} for {u.get('mins')} game min")
+    if s.get("pstate") and s.get("pstate") not in ("IdleState", "PlayerActionsState", "PathFindState"):
+        L.append(f"   player state: {s['pstate']}")
     if s.get("dead"):
         L.append("*** DEAD ***")
     return L

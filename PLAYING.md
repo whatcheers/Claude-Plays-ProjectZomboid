@@ -49,6 +49,9 @@ that whole history. In one session, 86 game turns rode on 559 model calls and a 
 | `BITTEN (health H)` | a new bite. Every bite is fatal eventually |
 | `hurt (health H)` | you lost more than 8 health this turn (change with `hurtpause`) |
 | `surrounded: N zombies within 2 tiles` / `exhausted` | the fight stopped for your safety |
+| `horde: N zombies coming for you` | several zombies are after you. **Don't `fight ... hold` here.** Back off the way you came (`go` 20+ tiles away), then route around them. A bat kills one at a time; four at once is how Cornelius was bitten 50 minutes in |
+| `combat stalled: Z#N ...` | swings did no damage. If one was within 1.5 tiles the bot already started running (`fled from N zombies` follows). Otherwise, move before fighting again |
+| `fled from N zombies` | a reflex ran from a group or a stalled fight. Don't walk straight back in |
 | `turn time limit` | 2 in-game hours passed (change with `maxturn`) |
 | `DEAD` | that's it |
 | `idle` | the turn only had instant commands (`look`, `scan`, ...) |

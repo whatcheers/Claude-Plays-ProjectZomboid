@@ -4,6 +4,21 @@ Versions follow [semver](https://semver.org/). The version lives in three places
 `modversion` in both `mod.info` files, `B.VERSION` in `ClaudeBot.lua`, and `VERSION` in `pz.py`
 (the driver warns when the game is running a different one). Each release is tagged `vX.Y.Z`.
 
+## 0.10.0 — 2026-09-30
+
+### Changed
+- **Zombies inside swing reach get shoved, not swung at.** A zombie 0.5 tiles away took 10 bat
+  swings with no damage (Cornelius, 7/13) while he stood still and got bitten. Under 0.75 tiles
+  the fight now shoves it back first, and a push that moves it away counts as progress.
+- **A stalled fight with a zombie within 1.5 tiles runs** (the flee reflex, `fled from N zombies`)
+  instead of ending the turn in place. Farther than that, it still stops for a decision.
+
+### Added
+- The state records the character's animation state (`player state:` line when it's unusual) and
+  warns `!! the game ran unpaused between turns` with when and for how long. Cornelius died
+  5 game minutes after a pause, before any new turn, and nothing said why.
+- PLAYING.md: what to do on `horde`, `combat stalled` and `fled from` pauses.
+
 ## 0.9.0 — 2026-09-30
 
 ### Added

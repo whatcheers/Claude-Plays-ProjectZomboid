@@ -5,7 +5,7 @@
 --   eval.lua   : optional snippet run by the "eval" command (debugging)
 ClaudeBot = ClaudeBot or {}
 local B = ClaudeBot
-B.VERSION = "0.9.0"  -- keep in step with mod.info and pz.py
+B.VERSION = "0.10.0"  -- keep in step with mod.info and pz.py
 B.results = B.results or {}
 B.turn = B.turn or 0
 B.speed = B.speed or 1
@@ -340,6 +340,9 @@ function B.state(reason)
 	if not p then s.noPlayer = true; return s end
 	s.dead = p:isDead()
 	s.pos = { x = r2(p:getX()), y = r2(p:getY()), z = math.floor(p:getZ()) }
+	-- the character's animation state, so a freeze (stuck in a hit reaction, on the ground...) is visible
+	s.pstate = try(function() local st = p:getCurrentState(); return st and st:getClass():getSimpleName() end)
+	s.unpausedIdle = B.unpausedIdle
 	s.outside = p:isOutside()
 	s.asleep = p:isAsleep()
 	local bd = p:getBodyDamage()
@@ -1508,22 +1511,32 @@ function B.fightTick(p)
 			local tr = f.tries[t.z]
 			local hp = t.z:getHealth()
 			local down = try(function() return t.z:isOnFloor() end)
-			if not tr or hp < tr.hp or (down and not tr.down) then
-				f.tries[t.z] = { hp = hp, n = 1, down = down }
+			-- a shove that pushes it back counts as progress too
+			if not tr or hp < tr.hp or (down and not tr.down) or t.d > tr.d + 0.4 then
+				f.tries[t.z] = { hp = hp, n = 1, down = down, d = t.d }
 			else
 				tr.n = tr.n + 1
 				tr.down = down
 				if tr.n > 4 then
-					-- Ignoring only within this fight let reflexes immediately retry
-					-- the same un-hittable enemy in a fresh fight. Stop for a decision.
-					local reason = "combat stalled: Z#" .. B.zid(t.z) .. " (4 swings, no damage); reposition or retreat"
+					local reason = "combat stalled: Z#" .. B.zid(t.z) .. " (4 swings, no damage)"
 					B.endFight(p, false, reason)
-					B.endTurn(reason)
+					-- Stopping to ask left him standing still while two zombies chewed on him
+					-- (Cornelius, 7/13): turn after turn the same stall, no move, then a bite.
+					-- With one in arm's reach, run first and report after.
+					if t.d < 1.5 and tonumber(B.policy.flee) then
+						B.rlog(reason .. "; breaking away")
+						B.startFlee(p, zs)
+						return
+					end
+					B.endTurn(reason .. "; reposition or retreat")
 					return
 				end
 			end
 		end
-		if f.shove then B.shove(p, t.z) else B.attack(p, t.z) end
+		-- inside a weapon's reach a swing whiffs (Z at 0.5 tiles took 10 bat swings, no damage):
+		-- shove it back, then swing
+		local tooClose = t.d < 0.75 and try(function() return not t.z:isOnFloor() end)
+		if f.shove or tooClose then B.shove(p, t.z) else B.attack(p, t.z) end
 	elseif f.hunt and t.seen and t.d < 14 then
 		local now = getTimestampMs()
 		if not f.pathing or now - (f.lastPath or 0) > 1500 then
@@ -2737,6 +2750,7 @@ function B.endTurn(reason)
 	B.turnActive = false
 	if B.keysHeld and B.keysHeld ~= "" then B.setKeys("") end
 	B.setPaused(true)
+	B.pausedAt = nowMin(); B.idleSince = nil; B.unpausedIdle = nil
 	B.dumpState(reason)
 end
 
@@ -2827,7 +2841,21 @@ function B.poll()
 	B.startTurn(id, lines)
 end
 
-function B.onTick() B.poll() end
+-- The game ran while no turn was active (Cornelius died 5 minutes after a horde pause, before
+-- any new turn). Note when and for how long, so the next turn's state says so.
+function B.watchIdle()
+	if B.turnActive or not B.pausedAt then return end
+	if B.isPaused() then B.idleSince = nil; return end
+	if not B.idleSince then
+		B.idleSince = nowMin()
+		local gt = getGameTime()
+		B.unpausedIdle = { at = string.format("%d/%d %02d:%02d", gt:getMonth() + 1, gt:getDay() + 1, gt:getHour(), gt:getMinutes()), mins = 0 }
+	else
+		B.unpausedIdle.mins = r2(nowMin() - B.idleSince)
+	end
+end
+
+function B.onTick() B.poll(); B.watchIdle() end
 function B.onRender() B.poll() end
 function B.onPlayerUpdate(p) if p == P() then B.monitor(p) end end
 
