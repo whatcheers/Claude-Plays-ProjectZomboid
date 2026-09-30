@@ -4,7 +4,28 @@ Versions follow [semver](https://semver.org/). The version lives in three places
 `modversion` in both `mod.info` files, `B.VERSION` in `ClaudeBot.lua`, and `VERSION` in `pz.py`
 (the driver warns when the game is running a different one). Each release is tagged `vX.Y.Z`.
 
-## 0.6.0 — 2026-09-30
+## 0.6.1 — 2026-09-30
+
+### Fixed (the v0.6.0 review's minor findings; `tests/run_edges.lua`)
+- **A walk that fails outside a line** goes to the reflex log (`... (outside a line)`) instead of
+  blaming the line waiting to run, or showing up as a `?` result. That covers a reflex's weapon
+  pick-up, locking up after `home`, and end-of-turn upkeep.
+- **A failed line no longer leaves a goal task or bash running**, when a command errors after
+  starting one.
+- **`startTurn` marks its own queue clear**, so no line starts in the same tick as the clear. It no
+  longer relies on event order.
+- Removed stale comments and the unused `B.climbSeen`. The spec now states the 300 ms settle time
+  actually used.
+
+### Tests
+- `tests/run_edges.lua` covers what no test pinned before:
+  - a line finished by its end marker;
+  - a `fight` line (done when the fight is; the runner holds meanwhile);
+  - a bash holding the runner;
+  - a waiting line not starting over queued reflex actions.
+- `run_continue.lua` restores all the turn state `startTurn` touches.
+
+
 
 ### Changed
 - **Turn runner: ClaudeBot runs a turn's lines itself, one at a time.** The game's action queue only

@@ -6,7 +6,7 @@ import pz
 
 s = {"turn": 7, "reason": "done", "time": {"month": 7, "day": 10, "hour": 16, "min": 5, "daysSurvived": 1.4},
      "results": [{"cmd": "go 1 2", "ok": False, "msg": "PATH FAILED (no route)"},
-                 {"cmd": "look", "ok": False, "msg": "NOT RUN: the queue was dropped after 'go 1 2'"}],
+                 {"cmd": "look", "ok": False, "msg": "NOT RUN: 'go 1 2' failed"}],
      "pos": {"x": 1, "y": 2, "z": 0}, "health": 90, "stats": {"hunger": 0.3}, "inventory": [], "reflexes": ["equipped Axe"]}
 path = os.path.join(tempfile.mkdtemp(), "turns.jsonl")
 pz.log_turn(["go 1 2", "look"], s, path)

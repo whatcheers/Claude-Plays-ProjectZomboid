@@ -5,7 +5,7 @@
 --   eval.lua   : optional snippet run by the "eval" command (debugging)
 ClaudeBot = ClaudeBot or {}
 local B = ClaudeBot
-B.VERSION = "0.6.0"  -- keep in step with mod.info and pz.py
+B.VERSION = "0.6.1"  -- keep in step with mod.info and pz.py
 B.results = B.results or {}
 B.turn = B.turn or 0
 B.speed = B.speed or 1
@@ -498,11 +498,16 @@ function B.stepResult(line, ok, msg)
 end
 
 -- An action of the running line failed (no route...). Report it on that line and mark it failed
--- for the runner.
+-- for the runner. Outside a line (a reflex's pick-up, locking up after `home`, end-of-turn upkeep)
+-- it only goes to the reflex log: no line should take the blame.
 function B.lineFailed(msg)
 	local l = B.curLine()
-	if l and l.status == "running" then l.failMsg = l.failMsg or msg end
-	B.res(l and l.text or "?", false, msg)
+	if l and l.status == "running" and not l.cut then
+		l.failMsg = l.failMsg or msg
+		B.res(l.text, false, msg)
+	else
+		B.rlog(msg .. " (outside a line)")
+	end
 end
 
 -- A failed walk (walkAdj, walkToContainer: take, loot, put...) only force-stops, which wipes
@@ -990,6 +995,9 @@ function B.failRun(p, l)
 	end
 	r.cur = #r.lines + 1
 	ISTimedActionQueue.clear(p)
+	-- a command that errored after starting a goal task (or a bash) must not leave it running
+	if B.task then B.task = nil; B.setSpeedRaw(B.speed) end
+	B.bash = nil
 	B.endTurn(l.task and ("task failed: " .. l.text) or "done")
 end
 
@@ -2627,6 +2635,8 @@ function B.startTurn(id, lines)
 	elseif #entries > 0 then
 		B.run = B.newRun(entries)
 	end
+	-- the clear above cancels anything queued in this tick; start no line until the next one
+	if B.run and not cont then B.run.clearedTick = (B.tickN or 0) + 1 end
 	local needRun = B.run ~= nil and B.run.cur <= #B.run.lines
 	B.turnHealth = p:getBodyDamage():getOverallBodyHealth()
 	B.turnBites = B.biteCount(p)
@@ -2669,13 +2679,12 @@ end
 function B.monitor(p)
 	if not B.turnActive then return end
 	if p:isDead() then B.endTurn("DEAD"); return end
-	-- Check before deferred work or animation waits can return early.
+	-- Check before anything below can return early.
 	local h = p:getBodyDamage():getOverallBodyHealth()
 	local bites = B.biteCount(p)
 	if bites > (B.turnBites or bites) then B.turnBites = bites; B.turnHealth = h; B.endTurn("BITTEN (health " .. r2(h) .. ")"); return end
 	if B.turnHealth and h < B.turnHealth - B.hurtPause then B.turnHealth = h; B.endTurn("hurt (health " .. r2(h) .. ")"); return end
 	B.tickN = (B.tickN or 0) + 1
-	-- window/fence climbs run as player states after their action leaves the queue
 	local st = p:getCurrentState()
 	-- window, climb and fall animations run as player states after their action leaves the
 	-- queue; ending the turn then pauses mid-animation and the window never opens
@@ -2720,7 +2729,7 @@ function B.monitor(p)
 	if B.wasAsleep and not asleep then B.wasAsleep = nil; B.endTurn("woke up (fatigue " .. r2(p:getStats():get(CharacterStat.FATIGUE)) .. ")"); return end
 	B.wasAsleep = asleep or nil
 	if nowMin() > B.turnDeadline and not asleep then B.endTurn("turn time limit"); return end
-	if climbing then B.climbSeen = true; return end
+	if climbing then return end
 	B.runTick(p)
 end
 

@@ -34,7 +34,7 @@ only ever holds the current line's actions.
    - An error fails the line.
    - An instant command (`look`, `find`, `fort`...) is `done` straight away with its message.
    - A goal command starts its task. The line stays `running` until `B.finishTask` reports.
-3. **Judge** a `running` line once the game queue is empty and has been empty for 600 ms:
+3. **Judge** a `running` line once the game queue is empty and has been empty for 300 ms (`SETTLE_MS`; window states start a tick after their action leaves the queue, and busy states hold the runner anyway, so 300 ms is plenty):
    - It has a `check` (window open/close/climb, and later others): run it. `ok` → `done`,
      error → `failed`, with the reason.
    - A failure was already recorded for it (e.g. PATH FAILED, couldn't walk there) → `failed`.

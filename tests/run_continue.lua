@@ -1,9 +1,13 @@
 -- `continue` keeps the unfinished run, restarts the interrupted line and appends new lines.
-local keys = {'run', 'results', 'turnActive', 'setPaused', 'writeFile', 'dumpState', 'turn'}
+-- startTurn resets a lot of turn state; save and restore all of it
+local keys = {'run', 'results', 'reflexLog', 'upkeepTried', 'turnActive', 'setPaused', 'writeFile',
+    'dumpState', 'turn', 'fight', 'task', 'bash', 'fleeing', 'setSpeedRaw', 'turnHealth', 'turnBites',
+    'turnSeen', 'turnClose', 'turnDeadline', 'turnStartReal'}
 local saved = {}
 for _, k in ipairs(keys) do saved[k] = B[k] end
 local ok, err = pcall(function()
     B.setPaused, B.writeFile, B.dumpState = function() end, function() end, function() end
+    B.setSpeedRaw = function() end
     B.run = B.newRun({{'go 1 2', 'go', {'1', '2'}}, {'look', 'look', {}}})
     B.run.lines[1].status, B.run.lines[1].tries = 'running', 1
     B.startTurn(12345, {'continue', 'say hi'})
