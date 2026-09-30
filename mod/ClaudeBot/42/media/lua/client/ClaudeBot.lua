@@ -5,7 +5,7 @@
 --   eval.lua   : optional snippet run by the "eval" command (debugging)
 ClaudeBot = ClaudeBot or {}
 local B = ClaudeBot
-B.VERSION = "0.7.0"  -- keep in step with mod.info and pz.py
+B.VERSION = "0.8.0"  -- keep in step with mod.info and pz.py
 B.results = B.results or {}
 B.turn = B.turn or 0
 B.speed = B.speed or 1
@@ -834,12 +834,40 @@ B.cmds.put = function(p, a)
 	return "putting " .. it:getDisplayName()
 end
 -- pack id [id...]: move items into the worn (or held) bag
+-- item args for drop/pack: an id, or Name*N / Name* (N or all loose items in main inventory
+-- whose name contains Name, case-insensitive), e.g. `drop Rag*` or `pack Log*2`
+function B.itemsArg(p, a)
+	local out = {}
+	for _, v in ipairs(a) do
+		local name, n = tostring(v):match("^(.-)%*(%d*)$")
+		if name and name ~= "" then
+			local want, got, items = tonumber(n) or 1e9, 0, p:getInventory():getItems()
+			name = name:lower()
+			for i = 0, items:size() - 1 do
+				local it = items:get(i)
+				if got < want and it:getDisplayName():lower():find(name, 1, true) and not p:isEquipped(it) and not it:isEquipped() then
+					out[#out + 1] = it; got = got + 1
+				end
+			end
+			if got == 0 then error("no loose " .. name .. " in inventory") end
+		else
+			out[#out + 1] = itemArg(p, v)
+		end
+	end
+	return out
+end
 B.cmds.pack = function(p, a)
 	local bag = p:getClothingItem_Back() or p:getSecondaryHandItem()
 	if not bag or not instanceof(bag, "InventoryContainer") then error("no worn bag") end
 	local dest = bag:getItemContainer()
+	local list = {}
 	for _, v in ipairs(a) do
-		local it, cont, wo = itemArg(p, v)
+		if tostring(v):find("*", 1, true) then
+			for _, it in ipairs(B.itemsArg(p, {v})) do list[#list + 1] = {it, it:getContainer()} end
+		else local it, cont, wo = itemArg(p, v); list[#list + 1] = {it, cont, wo} end
+	end
+	for _, e in ipairs(list) do
+		local it, cont, wo = e[1], e[2], e[3]
 		if wo then
 			toInventory(p, it, cont, wo)
 			Q(ISInventoryTransferAction:new(p, it, p:getInventory(), dest))
@@ -848,11 +876,10 @@ B.cmds.pack = function(p, a)
 			Q(ISInventoryTransferAction:new(p, it, cont, dest))
 		end
 	end
-	return "packing " .. #a .. " into " .. bag:getDisplayName()
+	return "packing " .. #list .. " into " .. bag:getDisplayName()
 end
 B.cmds.drop = function(p, a)
-	local items = {}
-	for _, v in ipairs(a) do items[#items + 1] = itemArg(p, v) end
+	local items = B.itemsArg(p, a)
 	B.letGo = B.letGo or {}
 	for _, it in ipairs(items) do B.letGo[it:getID()] = true end
 	ISInventoryPaneContextMenu.onDropItems(items, 0)
@@ -1107,25 +1134,38 @@ B.immediate.recipes = function(p, a)
 	for i, r in ipairs(rs) do s[#s + 1] = i .. ") " .. r.name .. (r.can and "" or " [missing stuff]") end
 	return it:getDisplayName() .. ": " .. table.concat(s, "; ")
 end
--- craft id [n]: do recipe n (default 1) from `recipes id`
+-- craft id [n] [all|xK]: do recipe n (default 1) from `recipes id`; `all` or `xK` repeats it
+-- on more items of the same type from your inventory (rip 14 sheets in one line)
 B.cmds.craft = function(p, a)
 	local it, cont, wo = itemArg(p, a[1])
 	local n = tonumber(a[2]) or 1
+	local rep = a[3] == "all" and 999 or tonumber((a[3] or ""):match("^x(%d+)$")) or 1
 	if wo or not cont:isInCharacterInventory(p) then toInventory(p, it, cont, wo) end
-	Q(ClaudeBotCall:new(p, "craft", function(p)
-		local r = craftList(p, it)[n]
-		if not r then error("no recipe " .. n .. " for " .. it:getDisplayName()) end
-		if not r.can then error("can't do " .. r.name .. " (missing tools or materials)") end
+	local ftype, done, first = it:getFullType(), 0, B.invCounts(p)
+	local function step(p, cur)
+		local r = craftList(p, cur)[n]
+		if not r then error("no recipe " .. n .. " for " .. cur:getDisplayName()) end
+		if not r.can then
+			if done > 0 then return r.name .. " x" .. done .. " (then missing stuff): " .. B.invDiff(first, B.invCounts(p)) end
+			error("can't do " .. r.name .. " (missing tools or materials)")
+		end
 		local before = B.invCounts(p)
-		ISInventoryPaneContextMenu.OnNewCraft(it, r.recipe, p:getPlayerNum(), false)
+		ISInventoryPaneContextMenu.OnNewCraft(cur, r.recipe, p:getPlayerNum(), false)
 		Q(ClaudeBotCall:new(p, "craft", function(p)
 			local d = B.invDiff(before, B.invCounts(p))
-			if d == "" then error(r.name .. " made nothing (interrupted?)") end
-			return r.name .. ": " .. d
+			if d == "" then
+				if done > 0 then return r.name .. " x" .. done .. " then interrupted: " .. B.invDiff(first, B.invCounts(p)) end
+				error(r.name .. " made nothing (interrupted?)")
+			end
+			done = done + 1
+			local nxt = done < rep and p:getInventory():getFirstType(ftype)
+			if not nxt then return r.name .. (done > 1 and " x" .. done or "") .. ": " .. B.invDiff(first, B.invCounts(p)) end
+			return step(p, nxt)
 		end))
-		return "crafting " .. r.name
-	end))
-	return "craft queued"
+		if done == 0 then return "crafting " .. r.name end
+	end
+	Q(ClaudeBotCall:new(p, "craft", function(p) return step(p, it) end))
+	return "craft queued" .. (rep > 1 and " (repeat " .. (a[3] == "all" and "all" or rep) .. ")" or "")
 end
 
 -- barricade x y [n]: nail n planks (default 1, max 4 per side) over the window or door on
@@ -1212,7 +1252,23 @@ B.cmds.chop = function(p, a)
 	if not tree then error("no tree at " .. a[1] .. "," .. a[2]) end
 	local axe = p:getInventory():getFirstEvalRecurse(function(it) return not it:isBroken() and try(function() return it:hasTag(ItemTag.CHOP_TREE) end) end)
 	if not axe then error("no axe") end
+	local function tired() return p:getStats():get(CharacterStat.ENDURANCE) < 0.15 end
+	if tired() then error("too tired to chop (endurance " .. string.format("%.2f", p:getStats():get(CharacterStat.ENDURANCE)) .. "); rest first") end
+	local function floor()
+		local t = {}
+		for dx = -1, 1 do for dy = -1, 1 do
+			local s2 = sqAt(sq:getX() + dx, sq:getY() + dy, sq:getZ())
+			local w = s2 and s2:getWorldObjects()
+			for i = 0, (w and w:size() or 0) - 1 do local n = w:get(i):getItem():getDisplayName(); t[n] = (t[n] or 0) + 1 end
+		end end
+		return t
+	end
+	local before = floor()
 	ISWorldObjectContextMenu.doChopTree(p, tree)
+	Q(ClaudeBotCall:new(p, "chop", function(p)
+		if sq:getTree() then error("tree at " .. a[1] .. "," .. a[2] .. " still standing (" .. (tired() and "exhausted; rest first" or "interrupted?") .. ")") end
+		return "felled: " .. B.invDiff(before, floor())
+	end))
 	return "chopping the tree at " .. a[1] .. "," .. a[2] .. " with " .. axe:getDisplayName()
 end
 

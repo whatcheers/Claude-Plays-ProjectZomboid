@@ -91,8 +91,8 @@ IDs are item IDs (`#123456`) from the state; coordinates are world tiles (`x y`,
 | `take id [id...]` | move items into your main inventory (from containers, bodies, the floor or your bags) |
 | `loot x y [filter words] [max]` | take everything (or names matching the filter, `*` = all) from all containers and the floor on a tile, at most `max`; also searches bags inside containers. E.g. `loot 8143 11727 firefighter axe 2` |
 | `put id x y [n]` | put an item into container `n` (default 1) on a tile; refuses up front if it's full |
-| `pack id [id...]` | move items from main inventory into your worn bag (`take` or `loot` them first) |
-| `drop id [id...]` | drop to the floor |
+| `pack id [id...]` | move items from main inventory into your worn bag (`take` or `loot` them first). `Name*N` / `Name*` instead of an id picks N / all loose items whose name contains Name |
+| `drop id [id...]` | drop to the floor; takes `Name*N` / `Name*` like `pack` (`drop Rag*`) |
 | `eat id [fraction]` / `drink id [fraction]` | eat or drink (1 = all) |
 | `drinkat x y` | drink from a sink, toilet or other water source |
 | `fill id x y` | fill a container from a water source |
@@ -100,10 +100,10 @@ IDs are item IDs (`#123456`) from the state; coordinates are world tiles (`x y`,
 | `wear id` / `read id` | clothing, books |
 | `bandage id BodyPart` | e.g. `bandage 123 Hand_L` |
 | `wait minutes` | pass time (runs at speed 3) |
-| `craft id [n]` | do recipe `n` (default 1) from `recipes id`; reports what it made (`+2 Rag, -1 Tank Top`) |
+| `craft id [n] [all\|xK]` | do recipe `n` (default 1) from `recipes id`; reports what it made (`+2 Rag, -1 Tank Top`). `all` / `xK` repeats it on more items of the same type (`craft 123 2 all` rips every sheet) |
 | `barricade x y [n]` | nail `n` planks (default 1, max 4 per side) over the window or door on that tile, from the side you're on. Needs a hammer, planks and 2 nails each; opens a Box of Nails if needed. Reports how many actually went up |
 | `lock x y [off]` | close and lock (or unlock) a door; needs its key on you |
-| `chop x y` | fell the tree on that tile with your best axe; logs and branches drop on the stump's tile |
+| `chop x y` | fell the tree on that tile with your best axe; logs and branches drop on the stump's tile, and a check line lists them (`felled: +7 Log, ...`). Refuses below 0.15 endurance: exhaustion stops the swings. A size-8 (JUMBOXXL) tree gives 7 logs, size 6 gives 4, size 4 gives 2 |
 | `build Entity x y [w\|n]` | place a build-menu entity on a tile's west or north edge, e.g. `build LogFence x y w`. Materials count from inventory **and the 8 tiles around you**, so build next to heavy ones (logs) instead of carrying them. Skill-gated ones (wooden fences need Carpentry 3) fail with "can't build" |
 | `sleep [x y \| floor]` | walk to the nearest bed on this floor (or the one at x y) and sleep; no bed = floor. Turn ends on waking |
 | `enter [x y]` | walk to the car at x y (or the nearest within 8 tiles) and get in the driver's seat |
@@ -148,7 +148,10 @@ C container   ~ water source   i items on the floor   ? not seen yet
   the base's doors again on arrival; after any other return, check the `fort:` line.
 - `OVERLOADED` in the summary means over 1.25× your carry limit: you're slow, which is what gets
   you caught. Carry 3–4 planks (3 kg each) per trip.
-- No skill yet? A log fence (2 logs + 2 rags) needs none: `chop` a tree, stand by the logs, `build LogFence`.
+- Moving bulk (logs are 9 kg: one per trip): `python pz.py haul Log fromX fromY toX toY [trips] [perTrip]`
+  sends one turn of `loot` → `go` → `drop` cycles.
+- Bindings for log builds: one bed Sheet rips into 10 Rags (`craft id 2 all`).
+- No skill yet? A log fence (2 logs + 2 rags) needs none; it's climbable. A log wall (4 logs + 4 rags) isn't: `chop` a tree, stand by the logs, `build LogFence`.
 
 ## Driving
 

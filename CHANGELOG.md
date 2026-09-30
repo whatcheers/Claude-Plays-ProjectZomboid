@@ -4,6 +4,19 @@ Versions follow [semver](https://semver.org/). The version lives in three places
 `modversion` in both `mod.info` files, `B.VERSION` in `ClaudeBot.lua`, and `VERSION` in `pz.py`
 (the driver warns when the game is running a different one). Each release is tagged `vX.Y.Z`.
 
+## 0.8.0 — 2026-09-30
+
+### Added
+- **`craft id n all|xK`** repeats a recipe on more items of the same type (14 sheets → 140 rags in one line).
+- **`drop` / `pack` take `Name*N` or `Name*`** to pick loose inventory items by name instead of ids.
+- **`pz.py haul <name> fromX fromY toX toY [trips] [perTrip]`**: a turn of loot → walk → drop cycles
+  for heavy materials (logs).
+- **`chop` checks its result**: `felled: +7 Log, +4 Sapling, ...`, or the tree is still standing.
+
+### Fixed
+- `chop` refuses under 0.15 endurance and says "exhausted; rest first" when exhaustion stops the swings,
+  instead of a bare "interrupted before it finished".
+
 ## 0.7.0 — 2026-09-30
 
 ### Added

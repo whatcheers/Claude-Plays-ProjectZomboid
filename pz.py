@@ -16,7 +16,7 @@ Set ZOMBOID_DIR if your Zomboid user folder isn't ~/Zomboid.
 """
 import json, os, sys, time
 
-VERSION = "0.7.0"  # keep in step with mod.info and B.VERSION in ClaudeBot.lua
+VERSION = "0.8.0"  # keep in step with mod.info and B.VERSION in ClaudeBot.lua
 
 D = os.path.join(os.environ.get("ZOMBOID_DIR") or os.path.expanduser("~/Zomboid"), "Lua", "claudebot")
 STATE, CMD = os.path.join(D, "state.json"), os.path.join(D, "cmd.txt")
@@ -529,6 +529,16 @@ if __name__ == "__main__":
         print(f"saved report for {a[1]}")
     elif a[0] == "watch":
         watch(int(a[1]) if a[1:] else 5160)
+    elif a[0] == "haul" and len(a) >= 6:
+        # python pz.py haul <name> <fromX> <fromY> <toX> <toY> [trips] [perTrip]: one turn of
+        # loot -> walk -> drop cycles (logs are 9 kg, so one per trip)
+        name, fx, fy, tx, ty = a[1:6]
+        trips = int(a[6]) if a[6:] else 4
+        per = int(a[7]) if a[7:] else 1
+        cmds = []
+        for _ in range(trips):
+            cmds += [f"loot {fx} {fy} {name} {per}", f"go {tx} {ty}", f"drop {name}*{per}"]
+        do(cmds)
     elif a[0] == "do":
         do([c for c in a[1:] if c != "--full"], full="--full" in a)
     else:
