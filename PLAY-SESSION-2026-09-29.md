@@ -106,3 +106,19 @@ side has a **7-tile gap, 8157–8163 on y=11663** (the driveway; the van is park
 Materials count within 1 tile of where you stand, so stand in the pile and build its neighbours, or
 carry 1 log per trip (9 kg). Every tree within ~45 tiles has been felled apart from one at 8120,11704.
 The next logs are farther out.
+
+## Prep run (2026-09-30, game July 13, survivor Brent)
+
+Brent wears a Padded Jacket, Leather Gloves and a Duffel Bag; he carries a Firefighter Axe, a Hacksaw and a Screwdriver.
+North wall at y=11663: walls at 8157-8158 and 8163, LogGates at 8159-8160 and 8161-8162 (4-tile van opening).
+
+| where | added this run |
+|---|---|
+| kitchen counter 8157,11679 | all 16 seed packet types, Gardening Trowel, 2 Box of Nails, Peanut Butter, 2 Rice, Canned Peas, Canned Fruit Beverage, Evaporated Milk, Crackers, Sugar Cubes |
+| kitchen shelves 8157,11678 | Cereal, 2 Sugar Cubes (shelves now full) |
+| medicine cabinet 8155,11676 | Disinfectant, Painkillers, Rubber Gloves, ~5 Adhesive Bandages |
+| dresser 8154,11684 | Shovel |
+
+Not carried: about 33 planks in crates at 8243,11693 (locked house); antibiotics at 8243,11688 (same house, unreachable);
+8 bags of concrete powder in crate 8138,11669; garden hoes, a scythe and trowels in crate 8137,11669.
+No grocery within 120 tiles on foot; no generator, sledgehammer or propane torch seen.
