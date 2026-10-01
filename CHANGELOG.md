@@ -4,6 +4,17 @@ Versions follow [semver](https://semver.org/). The version lives in three places
 `modversion` in both `mod.info` files, `B.VERSION` in `ClaudeBot.lua`, and `VERSION` in `pz.py`
 (the driver warns when the game is running a different one). Each release is tagged `vX.Y.Z`.
 
+## 0.12.0 — 2026-09-30
+
+### Added
+- **`put Name* x y` / `put Name*N x y`**: put by name, matching main inventory and worn bags. One weight
+  check up front for the whole batch, and the verify line counts what went in.
+
+### Fixed
+- **`window x y climb` on a closed window** opens it first; before, it reported "the climb never started".
+- `Name*` with no match says where it looked ("no seed in inventory or worn bags").
+- PLAYING.md: use `travel` rather than `go` beyond ~20 tiles or into unexplored ground, and empty a bag before dropping it.
+
 ## 0.11.0 — 2026-09-30
 
 ### Added

@@ -5,7 +5,7 @@
 --   eval.lua   : optional snippet run by the "eval" command (debugging)
 ClaudeBot = ClaudeBot or {}
 local B = ClaudeBot
-B.VERSION = "0.11.0"  -- keep in step with mod.info and pz.py
+B.VERSION = "0.12.0"  -- keep in step with mod.info and pz.py
 B.results = B.results or {}
 B.turn = B.turn or 0
 B.speed = B.speed or 1
@@ -742,6 +742,8 @@ B.cmds.window = function(p, a)
 	elseif verb == "smash" then Q(ISSmashWindow:new(p, w))
 	elseif verb == "clearglass" then Q(ISRemoveBrokenGlass:new(p, w))
 	elseif verb == "climb" then
+		-- a closed window has to be opened first ("the climb never started" otherwise)
+		if isWindow(w) and not w:IsOpen() and not w:isSmashed() then Q(ISOpenCloseWindow:new(p, w)) end
 		local act, side, started = ISClimbThroughWindow:new(p, w, 0), nil, false
 		local perform = act.perform
 		act.perform = function(self) side, started = windowSide(self.character, w), true; perform(self) end
@@ -827,41 +829,63 @@ B.cmds.loot = function(p, a)
 	if n == 0 then error("nothing" .. (filter and (" matching " .. filter) or "") .. " at " .. a[1] .. "," .. a[2]) end
 	return "looting " .. n .. " items"
 end
+-- put <id | Name* | Name*N> x y [n]: into the n-th container on that tile; names also match
+-- items inside your worn bags
 B.cmds.put = function(p, a)
-	local it = itemArg(p, a[1])
+	local items = tostring(a[1]):find("*", 1, true) and B.itemsArg(p, {a[1]}, true) or { (itemArg(p, a[1])) }
 	local sq = sqAt(num(a[2]), num(a[3]), math.floor(p:getZ()))
 	local cs = B.containersOn(sq)
 	local e = cs[tonumber(a[4]) or 1]
 	if not e then error("no container there") end
 	-- a full container refuses the transfer silently, so check first and after
-	if not try(function() return e.c:hasRoomFor(p, it) end) then
-		error(e.kind .. " is full (" .. r2(e.c:getCapacityWeight()) .. "/" .. r2(e.c:getEffectiveCapacity(p)) .. " kg); try another container")
+	local w = 0
+	for _, it in ipairs(items) do w = w + it:getUnequippedWeight() end
+	local room = try(function() return e.c:getEffectiveCapacity(p) - e.c:getCapacityWeight() end)
+	if not try(function() return e.c:hasRoomFor(p, items[1]) end) or (room and w > room + 0.01) then
+		error(e.kind .. " is full (" .. r2(e.c:getCapacityWeight()) .. "/" .. r2(e.c:getEffectiveCapacity(p)) .. " kg, need " .. r2(w) .. "); try another container")
 	end
-	if p:isEquipped(it) then Q(ISUnequipAction:new(p, it, 50)) end
 	luautils.walkToContainer(e.c, 0)
-	Q(ISInventoryTransferAction:new(p, it, it:getContainer(), e.c))
+	for _, it in ipairs(items) do
+		if p:isEquipped(it) then Q(ISUnequipAction:new(p, it, 50)) end
+		Q(ISInventoryTransferAction:new(p, it, it:getContainer(), e.c))
+	end
 	Q(ClaudeBotCall:new(p, "put", function(p)
-		if it:getContainer() ~= e.c then error(it:getDisplayName() .. " did not go into the " .. e.kind) end
+		local miss = 0
+		for _, it in ipairs(items) do if it:getContainer() ~= e.c then miss = miss + 1 end end
+		if miss > 0 then error(miss .. " of " .. #items .. " did not go into the " .. e.kind) end
+		return #items .. " in the " .. e.kind
 	end))
-	return "putting " .. it:getDisplayName()
+	return "putting " .. (#items == 1 and items[1]:getDisplayName() or (#items .. " items"))
 end
 -- pack id [id...]: move items into the worn (or held) bag
 -- item args for drop/pack: an id, or Name*N / Name* (N or all loose items in main inventory
 -- whose name contains Name, case-insensitive), e.g. `drop Rag*` or `pack Log*2`
-function B.itemsArg(p, a)
+function B.itemsArg(p, a, inBags)
 	local out = {}
 	for _, v in ipairs(a) do
 		local name, n = tostring(v):match("^(.-)%*(%d*)$")
 		if name and name ~= "" then
-			local want, got, items = tonumber(n) or 1e9, 0, p:getInventory():getItems()
+			local want, got = tonumber(n) or 1e9, 0
 			name = name:lower()
-			for i = 0, items:size() - 1 do
-				local it = items:get(i)
-				if got < want and it:getDisplayName():lower():find(name, 1, true) and not p:isEquipped(it) and not it:isEquipped() then
-					out[#out + 1] = it; got = got + 1
+			-- main inventory, then (for put) the bags you wear or hold
+			local conts = { p:getInventory() }
+			if inBags then
+				local items = p:getInventory():getItems()
+				for i = 0, items:size() - 1 do
+					local b = items:get(i)
+					if instanceof(b, "InventoryContainer") and (p:isEquipped(b) or b:isEquipped()) then conts[#conts + 1] = b:getItemContainer() end
 				end
 			end
-			if got == 0 then error("no loose " .. name .. " in inventory") end
+			for _, c in ipairs(conts) do
+				local items = c:getItems()
+				for i = 0, items:size() - 1 do
+					local it = items:get(i)
+					if got < want and it:getDisplayName():lower():find(name, 1, true) and not p:isEquipped(it) and not it:isEquipped() then
+						out[#out + 1] = it; got = got + 1
+					end
+				end
+			end
+			if got == 0 then error("no " .. (inBags and "" or "loose ") .. name .. " in inventory" .. (inBags and " or worn bags" or "")) end
 		else
 			out[#out + 1] = itemArg(p, v)
 		end

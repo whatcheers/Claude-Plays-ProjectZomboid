@@ -87,15 +87,15 @@ IDs are item IDs (`#123456`) from the state; coordinates are world tiles (`x y`,
 
 | command | does |
 |---|---|
-| `go x y [z]` | pathfind there (reports `PATH FAILED` if there's no route). No `z`: your floor if x,y has one there, else the next one down (so outdoors from upstairs goes to the ground) |
+| `go x y [z]` | pathfind there (reports `PATH FAILED` if there's no route). No `z`: your floor if x,y has one there, else the next one down (so outdoors from upstairs goes to the ground). One raw path: it fails on a blocked target or far/unexplored ground, so **use `travel` for anything beyond ~20 tiles** |
 | `step dx dy` | pathfind relative to where you are |
 | `door x y` | walk to the door on that tile and open or close it |
-| `window x y open\|close\|smash\|clearglass\|climb` | window actions (`climb` is the default). `open`, `close` and `climb` add a check line: `window is open`, `climbed through`, or why not |
+| `window x y open\|close\|smash\|clearglass\|climb` | window actions (`climb` is the default). `open`, `close` and `climb` add a check line: `window is open`, `climbed through`, or why not. `climb` opens a closed window first |
 | `take id [id...]` | move items into your main inventory (from containers, bodies, the floor or your bags) |
 | `loot x y [filter words] [max]` | take everything (or names matching the filter, `*` = all, `rope,twine` = either) from all containers and the floor on a tile, at most `max`; also searches bags inside containers. E.g. `loot 8143 11727 firefighter axe 2` |
-| `put id x y [n]` | put an item into container `n` (default 1) on a tile; refuses up front if it's full |
+| `put id\|Name*\|Name*N x y [n]` | put items into container `n` (default 1) on a tile. Names also match items inside worn bags (`put Seed* 8157 11679`). Refuses up front if they won't fit |
 | `pack id [id...]` | move items from main inventory into your worn bag (`take` or `loot` them first). `Name*N` / `Name*` instead of an id picks N / all loose items whose name contains Name |
-| `drop id [id...]` | drop to the floor; takes `Name*N` / `Name*` like `pack` (`drop Rag*`) |
+| `drop id [id...]` | drop to the floor; takes `Name*N` / `Name*` like `pack` (`drop Rag*`). Dropping a bag may spill what's in it; empty it with `put` first |
 | `eat id [fraction]` / `drink id [fraction]` | eat or drink (1 = all); `eat` on pills takes one dose |
 | `drinkat x y` | drink from a sink, toilet or other water source |
 | `fill id x y` | fill a container from a water source |
