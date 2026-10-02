@@ -4,6 +4,19 @@ Versions follow [semver](https://semver.org/). The version lives in three places
 `modversion` in both `mod.info` files, `B.VERSION` in `ClaudeBot.lua`, and `VERSION` in `pz.py`
 (the driver warns when the game is running a different one). Each release is tagged `vX.Y.Z`.
 
+## 0.13.0 — 2026-10-02
+
+### Added
+- **`uninstall x y Part` / `install x y Part [ItemType]`**: swap car parts (e.g. `Battery`). They wrap the
+  vanilla part menu, so the walk to the area, opening the hood and equipping the tool all happen. `uninstall` refuses
+  up front and says why (car locked with no key, another part must come off first, a tool is missing). `install` picks the
+  fullest matching item, so the dead battery you just pulled doesn't go back in.
+- `cars` shows battery charge (`batt 87%` / `no battery`).
+
+### Fixed
+- `engine` failures now give a reason: no battery, a dead battery, or the battery % and engine condition.
+- `pstate` in the state dump threw every turn (`getSimpleName` on a Java class); it now parses `tostring`.
+
 ## 0.12.0 — 2026-09-30
 
 ### Added

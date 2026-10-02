@@ -111,7 +111,8 @@ IDs are item IDs (`#123456`) from the state; coordinates are world tiles (`x y`,
 | `dismantle x y [n\|w]` | take apart something you or others built (log wall, fence, crate) on that tile, optionally only the one on its north/west edge. Needs a **saw and a screwdriver** in inventory. Drops some of its materials (e.g. a few logs) on the tile |
 | `sleep [x y \| floor]` | walk to the nearest bed on this floor (or the one at x y) and sleep; no bed = floor. Turn ends on waking |
 | `enter [x y]` | walk to the car at x y (or the nearest within 8 tiles) and get in the driver's seat |
-| `engine [off]` | start the engine (needs its key in inventory; can fail, just try again) or shut it off |
+| `engine [off]` | start the engine (needs its key in inventory; can fail, just try again; a dead battery says so) or shut it off |
+| `uninstall x y Part` / `install x y Part` | swap a car part, e.g. `Battery` from an unlocked donor car (locked cars refuse: battery needs the key). `cars` shows `batt %`; battery types (CarBattery1/2/3) must match |
 | `drive x y [x y ...] [max=kmh]` | drive through the waypoints (default 25 km/h). Pick them along roads, every corner a waypoint. Follows the line between waypoints, K-turns when the next one is behind you, backs up when blocked, brakes to a stop at the last. **Takes over the game window's keyboard** (see below) |
 | `reverse [tiles] [left\|right]` | back up that far (default 4), optionally steering, then stop. Use it to get out of a nose-in spot first |
 | `exit` | get out |

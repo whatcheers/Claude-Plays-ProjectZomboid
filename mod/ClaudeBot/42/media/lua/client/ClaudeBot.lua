@@ -5,7 +5,7 @@
 --   eval.lua   : optional snippet run by the "eval" command (debugging)
 ClaudeBot = ClaudeBot or {}
 local B = ClaudeBot
-B.VERSION = "0.12.0"  -- keep in step with mod.info and pz.py
+B.VERSION = "0.13.0"  -- keep in step with mod.info and pz.py
 B.results = B.results or {}
 B.turn = B.turn or 0
 B.speed = B.speed or 1
@@ -341,7 +341,7 @@ function B.state(reason)
 	s.dead = p:isDead()
 	s.pos = { x = r2(p:getX()), y = r2(p:getY()), z = math.floor(p:getZ()) }
 	-- the character's animation state, so a freeze (stuck in a hit reaction, on the ground...) is visible
-	s.pstate = try(function() local st = p:getCurrentState(); return st and st:getClass():getSimpleName() end)
+	s.pstate = try(function() local st = p:getCurrentState(); return st and (tostring(st):match("([%w_]+)@") or tostring(st)) end)
 	s.unpausedIdle = B.unpausedIdle
 	s.outside = p:isOutside()
 	s.asleep = p:isAsleep()
@@ -2003,12 +2003,22 @@ function B.vehicles(p, r)
 	return out
 end
 
+-- battery charge 0..1, or nil when no battery is installed
+function B.battery(v)
+	return try(function()
+		local item = v:getPartById("Battery"):getInventoryItem()
+		return item and item:getCurrentUsesFloat()
+	end)
+end
+
 function B.vehInfo(p, v)
 	local s = vehName(v) .. " @" .. math.floor(v:getX()) .. "," .. math.floor(v:getY())
 	local gas = try(function() return v:getPartById("GasTank") end)
 	if gas then s = s .. string.format(" gas %.0f/%.0f", gas:getContainerContentAmount(), gas:getContainerCapacity()) end
 	local key = try(function() return p:getInventory():haveThisKeyId(v:getKeyId()) end) or try(function() return v:isKeysInIgnition() end)
 	s = s .. (key and " KEY" or " no key")
+	local batt = B.battery(v)
+	if batt then s = s .. string.format(" batt %.0f%%", batt * 100) else s = s .. " no battery" end
 	if try(function() return v:isEngineRunning() end) then s = s .. " engine on" end
 	if try(function() return v:isAnyDoorLocked() end) then s = s .. " locked" end
 	if v:getDriver() then s = s .. (v:getDriver() == p and " (you drive)" or " (occupied)") end
@@ -2065,9 +2075,71 @@ B.cmds.engine = function(p, a, line)
 	Q(ClaudeBotWait:new(p, 1))
 	Q(ClaudeBotCall:new(p, line, function(pp)
 		if v:isEngineRunning() or v:isEngineStarted() then return "engine running" end
-		error("engine didn't start (try again; cold or damaged engines fail)")
+		local batt = B.battery(v)
+		if not batt then error("engine didn't start: no battery installed") end
+		if batt < 0.05 then error("engine didn't start: battery dead (" .. string.format("%.0f%%", batt * 100) .. "); swap one in with uninstall/install") end
+		local eng = try(function() return v:getPartById("Engine"):getCondition() end)
+		error("engine didn't start (battery " .. string.format("%.0f%%", batt * 100) .. ", engine cond " .. tostring(eng) .. "; try again)")
 	end))
 	return "starting the engine"
+end
+
+local function partArg(v, id)
+	local part = v:getPartById(id)
+	if not part then error(vehName(v) .. " has no part " .. tostring(id)) end
+	return part
+end
+
+-- uninstall x y Part: walk to the car at x y, open the hood if needed, take the part out (e.g. Battery)
+B.cmds.uninstall = function(p, a, line)
+	local v = vehicleArg(p, a)
+	local part = partArg(v, a[3])
+	local item = part:getInventoryItem()
+	if not item then error(a[3] .. " is not installed") end
+	if not v:canUninstallPart(p, part) then
+		local why = "needs its tool/recipe"
+		if VehicleUtils.RequiredKeyNotFound(part, p) then why = "car is locked and you have no key (smash a window or find the key)" end
+		local kv = part:getTable("uninstall") or {}
+		if kv.requireUninstalled and v:getPartById(kv.requireUninstalled) and v:getPartById(kv.requireUninstalled):getInventoryItem() then why = "remove " .. kv.requireUninstalled .. " first" end
+		error("can't uninstall " .. a[3] .. " from " .. vehName(v) .. ": " .. why)
+	end
+	ISVehiclePartMenu.onUninstallPart(p, part)
+	Q(ClaudeBotCall:new(p, line, function(pp)
+		if part:getInventoryItem() then error("still installed (needs a tool or skill? check `recipes`/the part's uninstall table)") end
+		return "removed " .. item:getDisplayName() .. " from " .. vehName(v)
+	end))
+	return "removing " .. a[3] .. " from " .. vehName(v)
+end
+
+-- install x y Part [ItemType]: put a part from your inventory into the car at x y
+B.cmds.install = function(p, a, line)
+	local v = vehicleArg(p, a)
+	local part = partArg(v, a[3])
+	if part:getInventoryItem() then error(a[3] .. " already installed; uninstall it first") end
+	local item
+	local types = part:getItemType()
+	local inv = p:getInventory()
+	-- the fullest one wins, so a dead battery you just pulled isn't put back
+	local best = -1
+	local function consider(t)
+		local all = inv:getAllTypeRecurse(t)
+		for i = 0, all:size() - 1 do
+			local it = all:get(i)
+			local fill = try(function() return it:getCurrentUsesFloat() end) or it:getCondition()
+			if fill > best then item = it; best = fill end
+		end
+	end
+	if a[4] then consider(a[4])
+	elseif types then
+		for i = 0, types:size() - 1 do consider(types:get(i)) end
+	end
+	if not item then error("no fitting " .. a[3] .. " in inventory") end
+	ISVehiclePartMenu.onInstallPart(p, part, item)
+	Q(ClaudeBotCall:new(p, line, function(pp)
+		if not part:getInventoryItem() then error("not installed (needs a tool or skill?)") end
+		return "installed " .. item:getDisplayName() .. " in " .. vehName(v)
+	end))
+	return "installing " .. item:getDisplayName() .. " in " .. vehName(v)
 end
 
 -- exit: stop and get out
