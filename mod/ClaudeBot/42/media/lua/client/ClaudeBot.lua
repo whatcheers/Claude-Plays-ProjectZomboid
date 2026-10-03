@@ -5,7 +5,7 @@
 --   eval.lua   : optional snippet run by the "eval" command (debugging)
 ClaudeBot = ClaudeBot or {}
 local B = ClaudeBot
-B.VERSION = "0.13.0"  -- keep in step with mod.info and pz.py
+B.VERSION = "0.14.0"  -- keep in step with mod.info and pz.py
 B.results = B.results or {}
 B.turn = B.turn or 0
 B.speed = B.speed or 1
@@ -171,6 +171,20 @@ function B.containersOn(sq)
 		for i = 0, bodies:size() - 1 do
 			local b = bodies:get(i)
 			if b:getContainer() then out[#out + 1] = { c = b:getContainer(), obj = b, kind = "corpse" } end
+		end
+	end
+	return out
+end
+
+-- a vehicle's item containers (trunk first, then seats, glovebox...), same shape as containersOn
+function B.vehicleContainers(v)
+	local out = {}
+	for i = 0, v:getPartCount() - 1 do
+		local part = v:getPartByIndex(i)
+		local c = part and part:getItemContainer()
+		if c then
+			local e = { c = c, obj = v, kind = part:getId() }
+			if part:getId():find("Truck") or part:getId():find("Trunk") then table.insert(out, 1, e) else out[#out + 1] = e end
 		end
 	end
 	return out
@@ -835,6 +849,8 @@ B.cmds.put = function(p, a)
 	local items = tostring(a[1]):find("*", 1, true) and B.itemsArg(p, {a[1]}, true) or { (itemArg(p, a[1])) }
 	local sq = sqAt(num(a[2]), num(a[3]), math.floor(p:getZ()))
 	local cs = B.containersOn(sq)
+	-- a car on the square: its trunk/seats/glovebox (luautils.walkToContainer paths to the part's area)
+	if #cs == 0 and sq and sq:getVehicleContainer() then cs = B.vehicleContainers(sq:getVehicleContainer()) end
 	local e = cs[tonumber(a[4]) or 1]
 	if not e then error("no container there") end
 	-- a full container refuses the transfer silently, so check first and after
@@ -1858,6 +1874,8 @@ function B.finishTask(ok, msg)
 	B.task = nil
 	t.ok = ok
 	B.setSpeedRaw(B.speed)
+	-- the last drive's per-tick trace, for tuning the steering
+	if t.log then B.writeFile("drive_log.csv", "ms,x,y,heading,kmh,wheel,want,err,yaw,key,road,off\n" .. table.concat(t.log, "\n") .. "\n") end
 	B.res(t.line, ok, msg)
 	-- walking in through a locked door with its key unlocks it and leaves it that way
 	if ok and t.home then
@@ -2167,6 +2185,115 @@ local function wrapAng(a)
 	return a
 end
 
+-- What a tile is, from its sprite. From media/newtiledefinitions.tiles.txt (FloorMaterial):
+-- blends_street_01 is asphalt (Road_01..07); floors_exterior_street_01 is lots and paving;
+-- blends_natural_01 0-15 is Sand (gravel) and 64-79 Dirt, the country roads and driveways.
+function B.tileKind(name)
+	if not name then return nil end
+	if name:find("^blends_street") or name:find("^floors_exterior_street") or name:find("^street_trafficlines") or name:find("^d_streetcracks") then return "road" end
+	local n = tonumber(name:match("^blends_natural_01_(%d+)$"))
+	if n and (n <= 15 or (n >= 64 and n <= 79)) then return "dirt" end
+	return nil
+end
+
+-- "road", "dirt" or nil for tile x,y (z 0). Any object on the square counts, since road edges
+-- are a grass floor with a street blend on top. Cached per drive; unloaded squares aren't.
+function B.roadAt(x, y)
+	x, y = math.floor(x), math.floor(y)
+	B.roadCache = B.roadCache or {}
+	local key = x * 100000 + y
+	local c = B.roadCache[key]
+	if c ~= nil then return c or nil end
+	local sq = sqAt(x, y, 0)
+	if not sq then return nil end
+	local kind = false
+	local objs = sq:getObjects()
+	for i = 0, objs:size() - 1 do
+		local sp = objs:get(i):getSprite()
+		local k = B.tileKind(sp and sp:getName())
+		if k == "road" then kind = k; break end
+		if k then kind = k end
+	end
+	B.roadCache[key] = kind
+	return kind or nil
+end
+
+-- other cars near the road ahead: {x, y, along, side, name} relative to the line from (sx,sy)
+-- along unit (ux,uy), looking `reach` tiles past the car at (vx,vy)
+function B.carsAhead(self, vx, vy, sx, sy, ux, uy, reach)
+	local out = {}
+	local list = try(function() return getCell():getVehicles() end)
+	if not list then return out end
+	for i = 0, list:size() - 1 do
+		local o = list:get(i)
+		if o ~= self then
+			local ox, oy = o:getX(), o:getY()
+			local along = (ox - vx) * ux + (oy - vy) * uy
+			if along > -3 and along < reach then
+				out[#out + 1] = { x = ox, y = oy, along = along, side = (ox - sx) * -uy + (oy - sy) * ux, name = vehName(o) }
+			end
+		end
+	end
+	return out
+end
+
+-- the fastest we should be going now so we can still slow down for the bends ahead:
+-- each waypoint's turn angle sets a speed for it, and we may be ~1.2 km/h faster per tile of distance
+local function bendSpeed(a)
+	if a < 0.26 then return 999 elseif a < 0.8 then return 30 elseif a < 1.6 then return 18 end
+	return 10
+end
+local function bendLimit(t, vx, vy, reach)
+	local lim, dist, px, py = 999, 0, vx, vy
+	for k = t.i, #t.pts do
+		local q = t.pts[k]
+		dist = dist + math.sqrt((q[1] + 0.5 - px) ^ 2 + (q[2] + 0.5 - py) ^ 2)
+		if dist > reach then break end
+		px, py = q[1] + 0.5, q[2] + 0.5
+		lim = math.min(lim, bendSpeed(t.turns[k] or 0) + dist * 1.2)
+	end
+	return lim
+end
+
+-- zombies within `wide` tiles of the path from (x,y) through pts[i..], looking `reach` tiles
+-- along it. Uses every loaded zombie, not just ones in sight: a car can plough through one or
+-- two, but a group across the road stops it dead and the crowd closes in.
+function B.routeZombies(x, y, pts, i, wide, reach)
+	local zl = getCell():getZombieList()
+	local segs, sx, sy, left = {}, x, y, reach
+	for k = i, #pts do
+		local ex, ey = pts[k][1] + 0.5, pts[k][2] + 0.5
+		local len = math.sqrt((ex - sx) ^ 2 + (ey - sy) ^ 2)
+		if len > left then
+			ex, ey = sx + (ex - sx) * left / len, sy + (ey - sy) * left / len
+			len = left
+		end
+		segs[#segs + 1] = { sx, sy, ex, ey, len }
+		left = left - len
+		sx, sy = ex, ey
+		if left <= 0 then break end
+	end
+	local n, nearest, nd = 0, nil, nil
+	for j = 0, zl:size() - 1 do
+		local z = zl:get(j)
+		if z and not z:isDead() then
+			local zx, zy = z:getX(), z:getY()
+			for _, g in ipairs(segs) do
+				local ux, uy = g[3] - g[1], g[4] - g[2]
+				local t = g[5] > 0 and math.max(0, math.min(1, ((zx - g[1]) * ux + (zy - g[2]) * uy) / (g[5] * g[5]))) or 0
+				local px, py = g[1] + ux * t, g[2] + uy * t
+				if (zx - px) ^ 2 + (zy - py) ^ 2 <= wide * wide then
+					n = n + 1
+					local d = (zx - x) ^ 2 + (zy - y) ^ 2
+					if not nd or d < nd then nearest, nd = z, d end
+					break
+				end
+			end
+		end
+	end
+	return n, nearest and (math.floor(nearest:getX()) .. "," .. math.floor(nearest:getY())), nd and math.sqrt(nd)
+end
+
 -- drive: pure pursuit through the waypoints; slow for turns, brake to a stop at the end
 local function driveTick(t, p)
 	local v = p:getVehicle()
@@ -2181,6 +2308,36 @@ local function driveTick(t, p)
 	t.lastMs = now
 	local vx, vy = v:getX(), v:getY()
 	local speed = v:getCurrentSpeedKmHour()
+	-- a crowd on the road ahead: stop well short and hand back so a new route gets picked
+	if t.horde then
+		if math.abs(speed) > 1 then B.setKeys("SPACE"); return end
+		B.setKeys("")
+		return B.finishTask(false, t.horde)
+	end
+	if now - (t.zAt or 0) > 250 then
+		t.zAt = now
+		local n, at, d = B.routeZombies(vx, vy, t.pts, t.i, 6, 30)
+		if n >= 3 then
+			t.horde = "HORDE ahead: " .. n .. " zombies within 6 tiles of the route, nearest at " .. at .. " (" .. r2(d) .. " tiles); stopped at " .. math.floor(vx) .. "," .. math.floor(vy) .. ". Pick another road or back off."
+			B.setKeys("SPACE")
+			return
+		end
+		-- the car itself: stop before it's wrecked or dry
+		local eng = try(function() return v:getPartById("Engine"):getCondition() end)
+		if eng and t.eng0 and t.eng0 - eng > 10 then
+			t.horde = "CAR DAMAGED: engine " .. t.eng0 .. " -> " .. eng .. " this drive; stopped at " .. math.floor(vx) .. "," .. math.floor(vy)
+			B.setKeys("SPACE"); return
+		end
+		local gas = try(function() return v:getPartById("GasTank"):getContainerContentAmount() end)
+		if gas and gas < 3 then
+			t.horde = "LOW GAS: " .. r2(gas) .. " L left; stopped at " .. math.floor(vx) .. "," .. math.floor(vy)
+			B.setKeys("SPACE"); return
+		end
+		-- the road surface under the car, for the "% on road" in the result
+		t.samples = (t.samples or 0) + 1
+		if B.roadAt(vx, vy) then t.onRoad = (t.onRoad or 0) + 1 end
+		t.scanCars = true
+	end
 	local pt = t.pts[t.i]
 	local dx, dy = pt[1] + 0.5 - vx, pt[2] + 0.5 - vy
 	local d = math.sqrt(dx * dx + dy * dy)
@@ -2190,7 +2347,7 @@ local function driveTick(t, p)
 	if last and d < 3 then
 		if math.abs(speed) > 1 then B.setKeys("SPACE"); return end
 		B.setKeys("")
-		return B.finishTask(true, "arrived at " .. math.floor(vx) .. "," .. math.floor(vy) .. " (" .. #t.pts .. " waypoints, " .. t.stucks .. " back-ups, " .. (t.kturns or 0) .. " K-turn moves, " .. (t.flips or 0) .. " steering flips, worst " .. r2(t.maxOff or 0) .. " tiles off the line)")
+		return B.finishTask(true, "arrived at " .. math.floor(vx) .. "," .. math.floor(vy) .. " (" .. B.driveStats(t) .. ")")
 	end
 	local f = v:getForwardVector(Vector3f.new())
 	-- aim at a point LOOK tiles ahead on the segment from the previous waypoint, not at the
@@ -2200,14 +2357,61 @@ local function driveTick(t, p)
 	local sx, sy = prev[1] + 0.5, prev[2] + 0.5
 	local lx, ly = ax - sx, ay - sy
 	local len = math.sqrt(lx * lx + ly * ly)
+	local ux, uy = 0, 0
+	if len > 1 then ux, uy = lx / len, ly / len end
 	if len > 1 and d > 4 then
-		local ux, uy = lx / len, ly / len
 		local proj = (vx - sx) * ux + (vy - sy) * uy
 		t.maxOff = math.max(t.maxOff or 0, math.abs((vx - sx) * uy - (vy - sy) * ux))
-		local s = math.min(len, math.max(0, proj) + 4)
+		local look = math.min(10, math.max(4, 3 + math.abs(speed) * 0.25))
+		local s = math.min(len, math.max(0, proj) + look)
 		ax, ay = sx + ux * s, sy + uy * s
 	end
-	local err = wrapAng(math.atan2(ay - vy, ax - vx) - math.atan2(f:z(), f:x()))
+	-- (nx, ny) points to the line's left; "off" moves the aim sideways along it
+	local nx, ny = -uy, ux
+	if t.scanCars and len > 1 then
+		t.scanCars = nil
+		-- a car on our line ahead: swing out to whichever side is still road and clear, keep
+		-- that offset until we're past it, or stop if there's no way round
+		local cars = B.carsAhead(v, vx, vy, sx, sy, ux, uy, 30)
+		local function clear(off)
+			for _, c in ipairs(cars) do if math.abs(c.side - off) < 2.6 then return false, c end end
+			return true
+		end
+		local function roadSide(off, along)
+			if not t.road then return true end
+			return B.roadAt(vx + ux * along + nx * off, vy + uy * along + ny * off) ~= nil
+		end
+		local ok, hit = clear(t.off or 0)
+		if not ok then
+			local best
+			for _, off in ipairs({ 3, -3, 4.5, -4.5 }) do
+				off = (hit.side > 0 and -off or off) -- try the side away from it first
+				if clear(off) and roadSide(off, math.max(2, hit.along)) then best = off; break end
+			end
+			if best then
+				t.off, t.dodges = best, (t.dodges or 0) + 1
+			elseif hit.along < 12 then
+				t.horde = "BLOCKED by " .. hit.name .. " at " .. math.floor(hit.x) .. "," .. math.floor(hit.y) .. ", no road either side; stopped at " .. math.floor(vx) .. "," .. math.floor(vy)
+				B.setKeys("SPACE"); return
+			end
+		elseif (t.off or 0) ~= 0 and clear(0) then
+			t.off = nil
+		end
+	end
+	if t.off then ax, ay = ax + nx * t.off, ay + ny * t.off end
+	-- keep to the road: if the aim point is off it but a tile beside it is road, slide over
+	if t.road and not B.roadAt(ax, ay) then
+		for _, s in ipairs({ 1, -1, 2, -2, 3, -3 }) do
+			if B.roadAt(ax + nx * s, ay + ny * s) then ax, ay = ax + nx * s, ay + ny * s; t.slides = (t.slides or 0) + 1; break end
+		end
+	end
+	local heading = math.atan2(f:z(), f:x())
+	if t.lastHead and t.lastTickMs and now > t.lastTickMs then
+		local rate = wrapAng(heading - t.lastHead) / ((now - t.lastTickMs) / 1000)
+		t.yaw = (t.yaw or 0) * 0.7 + rate * 0.3
+	end
+	t.lastHead, t.lastTickMs = heading, now
+	local err = wrapAng(math.atan2(ay - vy, ax - vx) - heading)
 	if t.revUntil and now < t.revUntil then
 		-- backing up flips the steering: swing the nose toward where you want to go
 		B.setKeys("S " .. (err < 0 and "D" or "A"))
@@ -2237,14 +2441,39 @@ local function driveTick(t, p)
 		end
 	end
 	local keys = {}
-	-- steering is on/off, so pulse it: hold the key for a share of each 250 ms that grows
-	-- with the error (full lock only past ~0.5 rad). Holding it on any error overshoots.
-	local duty = math.min(1, math.max(0, (math.abs(err) - 0.03) / 0.5))
-	if duty > 0 and (now % 250) < duty * 250 then keys[#keys + 1] = err < 0 and "A" or "D" end
+	-- Steering keys ramp the wheel angle (getCurrentSteering) and letting go recentres it, so
+	-- timing pulses never gives a steady angle: the car kept turning after the key came up and
+	-- weaved. Instead pick the wheel angle we want and press only until the real one gets there.
+	-- The want is set from the heading error ~0.5 s ahead (current yaw rate), so we ease off
+	-- before lining up rather than after.
+	local pred = err - (t.yaw or 0) * 0.5
+	local gain = 1.6 / (1 + math.abs(speed) / 30)
+	local want = 0
+	if math.abs(pred) > 0.04 then want = math.max(-0.9, math.min(0.9, pred * gain)) end
+	-- want > 0 means "turn like D does". Which sign getCurrentSteering gives D is learned
+	-- from the first key press that moves the wheel.
+	local wheel = try(function() return v:getCurrentSteering() end) or 0
+	if t.prevKey and t.prevWheel and math.abs(wheel - t.prevWheel) > 0.01 and not t.dSign then
+		local moved = wheel - t.prevWheel
+		t.dSign = (t.prevKey == "D") and (moved > 0 and 1 or -1) or (moved > 0 and -1 or 1)
+	end
+	local cur = wheel * (t.dSign or 1)
+	local key
+	if want > cur + 0.06 then key = "D" elseif want < cur - 0.06 then key = "A" end
+	if want == 0 and math.abs(cur) < 0.15 then key = nil end -- it recentres on its own
+	if key then keys[#keys + 1] = key end
+	t.prevKey, t.prevWheel = key, wheel
+	if #t.log < 3000 and now - (t.logAt or 0) >= 100 then
+		t.logAt = now
+		t.log[#t.log + 1] = string.format("%d,%.2f,%.2f,%.3f,%.1f,%.3f,%.3f,%.3f,%.3f,%s,%s,%.1f", now - t.t0, vx, vy, heading, speed, wheel, want, err, t.yaw or 0, key or "", B.roadAt(vx, vy) or "-", t.off or 0)
+	end
 	local side = err < -0.03 and -1 or (err > 0.03 and 1 or 0)
 	if side ~= 0 and t.side and side ~= t.side then t.flips = (t.flips or 0) + 1 end
 	if side ~= 0 then t.side = side end
-	local target = t.max
+	local target = math.min(t.max, bendLimit(t, vx, vy, 40))
+	if t.off then target = math.min(target, 15) end
+	-- driveways, yards, the bit between the house and the road
+	if t.road and not B.roadAt(vx, vy) then target = math.min(target, 10) end
 	if math.abs(err) > 0.4 then target = math.min(target, 12) end
 	if math.abs(err) > 1.2 then target = math.min(target, 7) end
 	if last then target = math.min(target, 4 + d * 1.5) end
@@ -2295,19 +2524,41 @@ B.cmds.reverse = function(p, a, line)
 	return "backing up " .. (tonumber(a[1]) or 4) .. " tiles"
 end
 
--- drive x y [x y ...] [max=kmh]: drive through waypoints (pick them along roads)
+function B.driveStats(t)
+	local s = #t.pts .. " waypoints, " .. t.stucks .. " back-ups, " .. (t.kturns or 0) .. " K-turn moves, " .. (t.flips or 0) .. " steering flips, worst " .. r2(t.maxOff or 0) .. " tiles off the line"
+	if t.samples and t.samples > 0 then s = s .. ", " .. math.floor(100 * (t.onRoad or 0) / t.samples + 0.5) .. "% on road" end
+	if t.dodges then s = s .. ", " .. t.dodges .. " swerves round cars" end
+	local secs = (getTimestampMs() - t.t0) / 1000
+	if secs > 0 then s = s .. ", " .. math.floor(secs) .. " s" end
+	return s
+end
+
+-- drive x y [x y ...] [max=kmh] [road]: drive through waypoints (pick them along roads).
+-- `road` (pz.py route sends it) keeps the aim on road tiles and slows to 10 off them.
 B.cmds.drive = function(p, a, line)
 	driving(p)
-	local pts, max, nums = {}, 25, {}
+	local pts, max, nums, road = {}, 25, {}, false
 	for _, w in ipairs(a) do
 		local m = w:match("^max=(%d+)$")
-		if m then max = tonumber(m) else nums[#nums + 1] = num(w, "coordinate") end
+		if m then max = tonumber(m) elseif w == "road" then road = true else nums[#nums + 1] = num(w, "coordinate") end
 	end
 	if #nums < 2 or #nums % 2 == 1 then error("need x y pairs") end
 	for i = 1, #nums, 2 do pts[#pts + 1] = { nums[i], nums[i + 1] } end
-	B.setSpeedRaw(1)
 	local v = p:getVehicle()
-	startTask({ kind = "drive", pts = pts, i = 1, max = max, start = { math.floor(v:getX()), math.floor(v:getY()) }, stucks = 0, tick = driveTick,
+	local n, at = B.routeZombies(v:getX(), v:getY(), pts, 1, 6, 2000)
+	if n >= 3 and not a.force then error("route blocked: " .. n .. " zombies within 6 tiles of it, nearest at " .. at .. ". Pick another road (or survey first)") end
+	B.setSpeedRaw(1)
+	-- how sharply the route bends at each waypoint, for slowing down ahead of it
+	local start = { math.floor(v:getX()), math.floor(v:getY()) }
+	local turns = {}
+	for k = 1, #pts - 1 do
+		local q0, q1, q2 = pts[k - 1] or start, pts[k], pts[k + 1]
+		turns[k] = math.abs(wrapAng(math.atan2(q2[2] - q1[2], q2[1] - q1[1]) - math.atan2(q1[2] - q0[2], q1[1] - q0[1])))
+	end
+	B.roadCache = {}
+	startTask({ kind = "drive", pts = pts, i = 1, max = max, start = start, stucks = 0, tick = driveTick,
+		road = road, turns = turns, eng0 = try(function() return v:getPartById("Engine"):getCondition() end),
+		log = {}, t0 = getTimestampMs(),
 		status = function(t) return "drive to waypoint " .. t.i .. "/" .. #t.pts .. " (" .. r2(t.dist or 0) .. " tiles)" end }, line)
 	return "driving " .. #pts .. " waypoints at up to " .. max .. " km/h"
 end
@@ -2921,6 +3172,9 @@ function B.monitor(p)
 		B.setSpeedRaw((#B.zombies(p, 15) > 0 or B.fight) and B.speed or 3)
 	end
 	local coming = 0
+	-- driving away: zombies chasing the car aren't a reason to stop it (pausing them in
+	-- deadlocked the escape); the drive's own route check stops for a crowd ahead
+	local motoring = p:getVehicle() and B.task and (B.task.kind == "drive" or B.task.kind == "reverse")
 	for _, e in ipairs(B.zombies(p, 20)) do
 		local id = B.zid(e.z)
 		local targeting = try(function() return e.z:getTarget() == p end)
@@ -2929,10 +3183,10 @@ function B.monitor(p)
 		-- once it gets close or starts coming
 		if e.seen and not B.turnSeen[id] and e.d <= 15 and (e.d <= 8 or targeting) then
 			B.turnSeen[id] = true
-			if not B.fight and not defend then B.endTurn("new zombie #" .. id .. " at " .. r2(e.d) .. " tiles"); return end
+			if not B.fight and not defend and not motoring then B.endTurn("new zombie #" .. id .. " at " .. r2(e.d) .. " tiles"); return end
 			B.rlog("saw Z#" .. id .. " at " .. r2(e.d) .. (targeting and " (coming)" or ""))
 		end
-		if e.d < 2.5 and not B.fight and not B.turnClose[id] and not defend then
+		if e.d < 2.5 and not B.fight and not B.turnClose[id] and not defend and not motoring then
 			B.turnClose[id] = true
 			B.endTurn("zombie #" .. id .. " within " .. r2(e.d) .. " tiles"); return
 		end
@@ -2940,15 +3194,17 @@ function B.monitor(p)
 	-- warn once per group (again only if it grows by 2); forget it once they stop coming
 	local horde = (tonumber(B.policy.flee) or 3) + 1
 	if coming < horde then B.hordeWarned = nil end
-	if coming >= horde and (not B.hordeWarned or coming >= B.hordeWarned + 2) then
+	if coming >= horde and not motoring and (not B.hordeWarned or coming >= B.hordeWarned + 2) then
 		B.hordeWarned = coming
-		B.endTurn("horde: " .. coming .. " zombies coming for you"); return
+		B.endTurn("horde: " .. coming .. " zombies coming for you" .. (p:getVehicle() and (" [in car, task " .. tostring(B.task and B.task.kind) .. "]") or "")); return
 	end
 	-- a night's sleep runs past the turn limit; the turn ends when you wake up
 	local asleep = p:isAsleep()
 	if B.wasAsleep and not asleep then B.wasAsleep = nil; B.endTurn("woke up (fatigue " .. r2(p:getStats():get(CharacterStat.FATIGUE)) .. ")"); return end
 	B.wasAsleep = asleep or nil
-	if nowMin() > B.turnDeadline and not asleep then B.endTurn("turn time limit"); return end
+	-- a drive runs to its end: arrival, a block, a horde, damage, low gas, or the user pausing
+	local longDrive = motoring and B.task.kind == "drive"
+	if nowMin() > B.turnDeadline and not asleep and not longDrive then B.endTurn("turn time limit"); return end
 	if climbing then return end
 	B.runTick(p)
 end

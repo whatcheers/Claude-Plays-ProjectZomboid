@@ -168,6 +168,14 @@ Lua can't work the pedals: the car reads `GameKeyboard`, which has no setter. So
 If you click away mid-drive, it lets go of every key and leaves the window alone until the next
 turn, so a human can step in.
 
+- **The user drives real trips** for now. Bot driving is for testing until it proves itself.
+- `pz.py route X Y [max=N] [go]` plans along the game's street map (`streets.xml`, railroads
+  dropped) and sends one `drive ... road` that runs until it arrives or stops for a reason:
+  `HORDE ahead`, `BLOCKED by <car>`, `CAR DAMAGED`, `LOW GAS`, `STUCK`, or you pausing.
+- How it knows the road: `road`/`dirt` from the tile sprites (`blends_street_01`, `floors_exterior_street_01`,
+  `blends_natural_01` gravel/dirt). It keeps its aim on road tiles and does 10 km/h off them.
+- It slows ahead of bends and swerves round parked cars when the side it picks is still road.
+- `pz.py drives` after a drive: time, tiles, average speed, % on road, steering flips per 50 tiles, swerves.
 - `cars [radius]` (instant) lists vehicles nearby: gas, whether you carry the key, engine, locked.
 - Parked cars are the main hazard. Waypoints that pass beside one in a turn will clip it.
 - Every drive result reports back-ups, K-turn moves, steering flips and the worst distance off

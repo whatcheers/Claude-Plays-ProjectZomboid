@@ -4,6 +4,44 @@ Versions follow [semver](https://semver.org/). The version lives in three places
 `modversion` in both `mod.info` files, `B.VERSION` in `ClaudeBot.lua`, and `VERSION` in `pz.py`
 (the driver warns when the game is running a different one). Each release is tagged `vX.Y.Z`.
 
+## 0.14.0 — 2026-10-03
+
+Auto-drive groundwork: the car knows what a road is, plans its speed for the bends ahead, and a
+road trip is one turn. **Not yet driven live**; the game was closed when this was written.
+
+### Added
+- **Road tiles**: `B.roadAt(x, y)` says `road`, `dirt` or nil from the sprites on the square.
+  Asphalt is `blends_street_01` (FloorMaterial Road_01..07 in `media/newtiledefinitions.tiles.txt`),
+  paving `floors_exterior_street_01`, gravel and dirt `blends_natural_01` 0-15 and 64-79.
+- `drive ... road` (sent by `pz.py route ... go`): keeps the aim point on road tiles, sliding up to
+  3 tiles sideways when the street map's centreline is off, and slows to 10 km/h off road (driveways).
+- **Bend speeds**: each waypoint's turn angle sets a speed (straight = max, gentle 30, 45-90° 18,
+  tighter 10). The car slows ahead of a bend within 40 tiles instead of reacting once it's in it.
+- **Cars on the road**: every 250 ms it looks 30 tiles ahead for other vehicles within 2.6 tiles of the
+  line. It swerves 3-4.5 tiles to a side that is still road and clear, holds that until the line is clear,
+  and stops with `BLOCKED by <car>` when there is no way round.
+- The drive also stops for `CAR DAMAGED` (engine condition down >10) and `LOW GAS` (<3 L).
+- Wheel-angle steering: hold A/D only until `getCurrentSteering` reaches the wanted angle, set from the
+  heading error 0.5 s ahead. Pulsing the keys never gave a steady angle and the car weaved.
+- `HORDE ahead`: 3+ zombies within 6 tiles of the route stop the drive, and `drive` refuses a route that has one.
+- The drive result gives % on road, swerves and seconds. `drive_log.csv` is written per drive
+  (now with `road` and `off` columns); **`pz.py drives`** summarises it.
+- **`put Name* x y` into a car**: trunk first, then seats and glovebox.
+- `tests/test_drive.py` (offline) and `tests/road_tiles.lua` (live eval).
+
+### Changed
+- A drive no longer ends at the turn time limit, and zombies chasing the car no longer pause it.
+  `pz.py do` waits up to an hour for a turn with a `drive`.
+- `pz.py route` defaults to `max=50`, adds the target as a last off-road waypoint when it is 3-40 tiles
+  from the nearest road, and sends `road`.
+
+### Fixed
+- **Routing**: the farm at 7198,9693 to the Rosewood base was 21.6 km by way of Fort Knox and
+  Irvington, and along railroads. It is 3.0 km now. The causes were that railroads were in the graph,
+  that pieces of the same road were never joined (junctions only linked different names), and that a
+  side road ending at a wide highway's edge was beyond the 5-tile join. The graph went from 98
+  components to 5.
+
 ## 0.13.0 — 2026-10-02
 
 ### Added

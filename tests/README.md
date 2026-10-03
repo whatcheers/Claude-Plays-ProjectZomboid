@@ -18,6 +18,7 @@ python pz.py eval (Get-Content 'tests/run_continue.lua' -Raw)
 python pz.py eval (Get-Content 'tests/weapon_letgo.lua' -Raw)
 python pz.py eval (Get-Content 'tests/run_cut.lua' -Raw)
 python pz.py eval (Get-Content 'tests/run_edges.lua' -Raw)
+python pz.py eval (Get-Content 'tests/road_tiles.lua' -Raw)
 ```
 
 All should print `PASS` in the eval result. The window test requires the loaded
@@ -40,3 +41,10 @@ inspect `results[].ok` in state.json rather than trusting the process exit code.
 Observed before fixes: combat queued a deferred walk then immediately ended the
 turn; window actions targeted an IsoWindowFrame despite an IsoWindow on the same
 tile; a failing eval misleadingly printed `ok eval: nil`.
+
+Offline (no game needed):
+
+```powershell
+python tests/test_turnlog.py
+python tests/test_drive.py
+```

@@ -9,14 +9,16 @@
   python pz.py report <agent> [file] save an agent's final report for its tab in watch (stdin if no file)
   python pz.py watch [port]          live turn feed in a browser, open to the home network (default 5160)
   python pz.py raw                   dump state.json
+  python pz.py route X Y [max=N] [go] road waypoints to X Y from the street map; go = drive them
+  python pz.py drives                how the last drive went (speed, % on road, flips, swerves)
   python pz.py reload                hot-reload ClaudeBot.lua in the running game
   python pz.py eval "R = p:getX()"   run Lua in the game (p = player, R = result)
 
 Set ZOMBOID_DIR if your Zomboid user folder isn't ~/Zomboid.
 """
-import json, os, sys, time
+import json, math, os, sys, time
 
-VERSION = "0.13.0"  # keep in step with mod.info and B.VERSION in ClaudeBot.lua
+VERSION = "0.14.0"  # keep in step with mod.info and B.VERSION in ClaudeBot.lua
 
 D = os.path.join(os.environ.get("ZOMBOID_DIR") or os.path.expanduser("~/Zomboid"), "Lua", "claudebot")
 STATE, CMD = os.path.join(D, "state.json"), os.path.join(D, "cmd.txt")
@@ -310,6 +312,7 @@ def load_prev():
 # Lua can't: the car reads GameKeyboard, which has no setter.
 KEYS = os.path.join(D, "keys.txt")
 SCAN = {"W": 0x11, "A": 0x1E, "S": 0x1F, "D": 0x20, "SPACE": 0x39}
+VK = {"W": 0x57, "A": 0x41, "S": 0x53, "D": 0x44, "SPACE": 0x20}
 
 
 class KeyPump:
@@ -322,6 +325,7 @@ class KeyPump:
         import ctypes
         from ctypes import wintypes
         self.ok, self.ct, self.u32 = True, ctypes, ctypes.windll.user32
+        self.u32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
 
         class KEYBDINPUT(ctypes.Structure):
             _fields_ = [("wVk", wintypes.WORD), ("wScan", wintypes.WORD), ("dwFlags", wintypes.DWORD),
@@ -363,23 +367,22 @@ class KeyPump:
             time.sleep(0.05)
         return h and self.u32.GetForegroundWindow() == h
 
+    def _post(self, k, up):
+        # post the key straight to the game window's message queue: GLFW tracks key state
+        # from these, so it works with the window in the background (the user typing in a
+        # terminal used to steal focus and the drive lost its keys mid-turn)
+        h = self._window()
+        if not h:
+            return
+        lp = 1 | (SCAN[k] << 16) | ((3 << 30) if up else 0)
+        self.u32.PostMessageW(h, 0x0101 if up else 0x0100, VK[k], lp)
+
     def set(self, want):
-        # take the window once per turn; if the user clicks away after that, let go of every
-        # key and leave them the window (grabbing it back fights them when they step in)
-        if want and not self.yielded:
-            h = self._window()
-            if not self.grabbed:
-                self.grabbed = True
-                self._focus()
-            if not h or self.u32.GetForegroundWindow() != h:
-                self.yielded = True
-                print("driving: the game window lost focus; keys released until the next turn")
-        if self.yielded:
-            want = set()
+        # no focus needed; the user steps in by pausing the game, which the mod sees
         for k in self.held - want:
-            self._send(SCAN[k], True)
+            self._post(k, True)
         for k in want - self.held:
-            self._send(SCAN[k], False)
+            self._post(k, False)
         self.held = want
 
     def poll(self):
@@ -409,6 +412,8 @@ def do(cmds, timeout=600, full=False):
     tid = int(time.time() * 10) % 10**9
     with open(CMD, "w", encoding="utf-8") as f:
         f.write(str(tid) + "\n" + "\n".join(cmds) + "\n")
+    # a road trip is one turn that runs until it arrives or stops for a reason; give it an hour
+    if any(c.split()[:1] == ["drive"] for c in cmds): timeout = max(timeout, 3600)
     t0, pump, last = time.time(), KeyPump(), 0
     try:
         while time.time() - t0 < timeout:
@@ -433,6 +438,36 @@ def do(cmds, timeout=600, full=False):
     print(f"timeout after {timeout}s waiting for turn {tid}. Is the game running, with ClaudeBot enabled and a character in the world?")
     log_turn(cmds, None)
     show(read_state())
+
+
+def drive_summary(path=None):
+    """python pz.py drives: the last drive from drive_log.csv (written when a drive ends):
+    time, distance, speeds, how much of it was on road, swerves and steering flips."""
+    import csv
+    path = path or os.path.join(D, "drive_log.csv")
+    try:
+        rows = list(csv.DictReader(open(path, encoding="utf-8")))
+    except OSError:
+        sys.exit("no drive_log.csv yet (it's written when a drive ends)")
+    if len(rows) < 2:
+        sys.exit("drive_log.csv has no samples")
+    f = lambda r, k: float(r.get(k) or 0)
+    secs = (f(rows[-1], "ms") - f(rows[0], "ms")) / 1000
+    dist = sum(math.dist((f(a, "x"), f(a, "y")), (f(b, "x"), f(b, "y"))) for a, b in zip(rows, rows[1:]))
+    kmh = [abs(f(r, "kmh")) for r in rows]
+    road = [r.get("road", "") for r in rows if "road" in r]
+    flips, side = 0, 0
+    for r in rows:
+        e = f(r, "err")
+        s = -1 if e < -0.03 else (1 if e > 0.03 else 0)
+        if s and side and s != side: flips += 1
+        if s: side = s
+    swerves = sum(1 for a, b in zip(rows, rows[1:]) if f(a, "off") == 0 and f(b, "off") != 0)
+    print("%.0f s, %.0f tiles, avg %.1f km/h, top %.0f km/h, %d samples" % (secs, dist, sum(kmh) / len(kmh), max(kmh), len(rows)))
+    if road:
+        print("on road %.0f%%, dirt %.0f%%, off %.0f%%" % tuple(100 * road.count(k) / len(road) for k in ("road", "dirt", "-")))
+    print("steering flips %d (%.1f per 50 tiles), swerves round cars %d" % (flips, 50 * flips / max(dist, 1), swerves))
+    print("from %.0f,%.0f to %.0f,%.0f" % (f(rows[0], "x"), f(rows[0], "y"), f(rows[-1], "x"), f(rows[-1], "y")))
 
 
 def save_report(name, text, rdir=REPORTS):
@@ -509,6 +544,27 @@ if __name__ == "__main__":
         show(read_state(), a[0])
     elif a[0] == "raw":
         print(json.dumps(read_state(), indent=1))
+    elif a[0] == "route" and len(a) >= 3:
+        # python pz.py route X Y [max=N] [go]: road waypoints from the street map (streets.xml,
+        # what pzmap.org draws) from where you are to X Y; "go" drives it right away
+        import roads
+        pos = (read_state() or {}).get("pos") or {}
+        try:
+            pts, names, km, off = roads.route(pos["x"], pos["y"], float(a[1]), float(a[2]))
+        except (KeyError, ValueError) as e:
+            sys.exit("route: %s" % e)
+        extra = [w for w in a[3:] if w.startswith("max=")] or ["max=50"]
+        # the street map ends at the road nearest the target; finish the last bit off-road
+        # (the mod slows to 10 off road tiles), e.g. up a driveway
+        tx, ty = round(float(a[1])), round(float(a[2]))
+        if off > 3 and off <= 40: pts = pts + [(tx, ty)]
+        cmd = "drive " + " ".join("%d %d" % p for p in pts) + " " + extra[0] + " road"
+        print("%s; %.0f tiles of road; the last waypoint is %.0f tiles from %s,%s" % (" > ".join(names), km * 1000, off, a[1], a[2]))
+        print(cmd)
+        if "go" in a[3:]:
+            do([cmd])
+    elif a[0] == "drives":
+        drive_summary()
     elif a[0] == "reload":
         status = os.path.join(D, "loader.txt")
         before = os.path.getmtime(status) if os.path.exists(status) else 0
